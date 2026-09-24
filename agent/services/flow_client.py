@@ -31,6 +31,10 @@ from agent.config import (
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
+from agent.services.flow_protocol import (
+    FlowProtocolError, parse_message, serialize_request, validate_request_id,
+)
+from agent.logging_utils import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +82,9 @@ class FlowClient:
             "token_captured_at": None,
             "extension_version": None,
             "flow_url_supported": None,
+            "flow_tab_available": False,
+            "extension_status": "disconnected",
+            "busy": False,
             "unavailable_until": 0,
         }
         # A new unauthenticated profile must not displace an already
@@ -113,6 +120,7 @@ class FlowClient:
         for req_id, future in disconnected_pending:
             if future is not None and not future.done():
                 future.set_exception(ConnectionError("Extension disconnected"))
+            self._pending.pop(req_id, None)
             self._pending_ws.pop(req_id, None)
 
         if self._extension_ws is disconnected_ws:
@@ -128,6 +136,7 @@ class FlowClient:
             len(disconnected_pending),
             len(self._extensions),
         )
+        log_event(logger, logging.WARNING, "flow_connection_lost", pending_cancelled=len(disconnected_pending), active_connections=len(self._extensions))
 
     def _extension_candidates(self, require_token: bool):
         """Return usable extensions in preferred routing order."""
@@ -186,6 +195,19 @@ class FlowClient:
             "public_error_user_quota_reached",
         ))
 
+    @staticmethod
+    def _is_failover_safe(method: str, params: dict) -> bool:
+        """Only fail over operations whose replay cannot create new media."""
+        if method == "get_status":
+            return True
+        if method != "batch_rpc":
+            return False
+        return params.get("rpcid") in {
+            fb.RPC_OPERATION,
+            fb.RPC_PROJECT_MEDIA,
+            fb.RPC_MEDIA,
+        }
+
     def set_flow_key(self, key: str):
         self._flow_key = key
         if self._extension_ws in self._extensions:
@@ -195,6 +217,13 @@ class FlowClient:
     @property
     def connected(self) -> bool:
         return bool(self._extensions)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def has_pending(self, request_id: str) -> bool:
+        return request_id in self._pending
 
     @property
     def ws_stats(self) -> dict:
@@ -220,6 +249,9 @@ class FlowClient:
             ),
             "extension_versions": versions,
             "flow_url_supported": all(flow_url_support) if flow_url_support else None,
+            "flow_tab_available": any(session.get("flow_tab_available") for session in self._extensions.values()),
+            "extension_statuses": sorted({session.get("extension_status", "unknown") for session in self._extensions.values()}),
+            "busy": any(session.get("busy") for session in self._extensions.values()),
             "connects": self._ws_connect_count,
             "disconnects": self._ws_disconnect_count,
             "uptime_s": uptime,
@@ -227,6 +259,11 @@ class FlowClient:
 
     async def handle_message(self, data: dict, websocket=None):
         """Handle incoming message from extension."""
+        try:
+            data = parse_message(data)
+        except FlowProtocolError as exc:
+            logger.warning("Rejected malformed extension message: %s", exc)
+            return False
         if data.get("type") == "token_captured":
             key = data.get("flowKey")
             source_ws = websocket or self._extension_ws
@@ -246,6 +283,9 @@ class FlowClient:
             if source_ws is not None and source_ws in self._extensions:
                 self._extensions[source_ws]["extension_version"] = version
                 self._extensions[source_ws]["flow_url_supported"] = flow_supported
+                self._extensions[source_ws]["extension_status"] = data.get("status", "unknown")
+                self._extensions[source_ws]["flow_tab_available"] = bool(data.get("flowTabAvailable"))
+                self._extensions[source_ws]["busy"] = bool(data.get("busy"))
             logger.info(
                 "Extension ready, flowKey=%s version=%s flow.google.com=%s",
                 "yes" if data.get("flowKeyPresent") else "no",
@@ -253,6 +293,15 @@ class FlowClient:
                 "yes" if flow_supported is True else "no" if flow_supported is False else "unknown",
             )
             asyncio.create_task(self._sync_tier())
+            return
+
+        if data.get("type") == "extension_status":
+            source_ws = websocket or self._extension_ws
+            if source_ws in self._extensions:
+                session = self._extensions[source_ws]
+                session["flow_tab_available"] = bool(data.get("flowTabAvailable"))
+                session["extension_status"] = data.get("status", "unknown")
+                session["busy"] = bool(data.get("busy"))
             return
 
         if data.get("type") == "media_urls_refresh":
@@ -271,10 +320,36 @@ class FlowClient:
 
         # Response to a pending request
         req_id = data.get("id")
-        if req_id and req_id in self._pending:
-            if not self._pending[req_id].done():
-                self._pending[req_id].set_result(data)
-            return
+        if req_id:
+            return self.deliver_response(data, websocket=websocket)
+        logger.warning("Ignored extension message without a control type or request id")
+        return False
+
+    def deliver_response(self, data: dict, websocket=None) -> bool:
+        """Deliver one response to its owning request, exactly once."""
+        try:
+            data = parse_message(data)
+            req_id = validate_request_id(data.get("id"))
+        except FlowProtocolError as exc:
+            logger.warning("Rejected malformed Flow response: %s", exc)
+            return False
+        future = self._pending.get(req_id)
+        if future is None:
+            logger.warning("Ignored response for unknown request_id=%s", req_id)
+            return False
+        owner = self._pending_ws.get(req_id)
+        if websocket is not None and owner is not None and websocket is not owner:
+            logger.warning("Ignored cross-connection response request_id=%s", req_id)
+            return False
+        if future.done():
+            logger.warning("Ignored duplicate response request_id=%s", req_id)
+            return False
+        future.set_result(data)
+        return True
+
+    async def request(self, method: str, params: dict, timeout: float = 300) -> dict:
+        """Application-facing adapter method; WebSocket details stay private."""
+        return await self._send(method, params, timeout=timeout)
 
     async def _sync_tier(self):
         """Detect current tier from credits API and update all active projects."""
@@ -380,9 +455,7 @@ class FlowClient:
             if media_id and self._UUID_RE.match(media_id):
                 targets.setdefault((media_id, kind), []).append((table, row_id, field))
 
-        scenes = []
-        for video in await crud.list_videos(project_id):
-            scenes.extend(await crud.list_scenes(video["id"]))
+        scenes = await crud.list_scenes_by_project(project_id)
 
         for scene in scenes:
             for prefix in ("vertical", "horizontal"):
@@ -446,22 +519,29 @@ class FlowClient:
             self._pending_ws[req_id] = extension_ws
 
             try:
-                await extension_ws.send(json.dumps({
-                    "id": req_id,
-                    "method": method,
-                    "params": params,
-                }))
+                started = time.monotonic()
+                log_event(logger, logging.INFO, "external_request_started", request_id=req_id,
+                          project_id=params.get("project_id"), operation=method)
+                await extension_ws.send(serialize_request(req_id, method, params))
                 last_result = await asyncio.wait_for(future, timeout=timeout)
+                log_event(logger, logging.INFO, "external_request_completed", request_id=req_id,
+                          project_id=params.get("project_id"), operation=method,
+                          duration_ms=round((time.monotonic() - started) * 1000),
+                          status=last_result.get("status") if isinstance(last_result, dict) else None)
             except asyncio.TimeoutError:
                 last_result = {"error": f"Timeout ({timeout}s) waiting for {method}"}
+                log_event(logger, logging.WARNING, "external_request_timeout", request_id=req_id,
+                          project_id=params.get("project_id"), operation=method, timeout_seconds=timeout)
             except Exception as e:
                 last_result = {"error": str(e)}
+                log_event(logger, logging.WARNING, "external_request_failed", request_id=req_id,
+                          project_id=params.get("project_id"), operation=method, error_type=type(e).__name__)
             finally:
                 self._pending.pop(req_id, None)
                 self._pending_ws.pop(req_id, None)
 
             has_alternative = index + 1 < len(extension_candidates)
-            if self._should_failover(last_result) and has_alternative:
+            if self._should_failover(last_result) and self._is_failover_safe(method, params) and has_alternative:
                 if extension_ws in self._extensions:
                     self._extensions[extension_ws]["unavailable_until"] = (
                         time.time() + 60

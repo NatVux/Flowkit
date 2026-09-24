@@ -38,7 +38,17 @@
 
 # FLOW KIT
 
-Standalone system to generate AI videos via Google Flow. Uses a Chrome extension as a browser bridge: it mints reCAPTCHA and runs Flow's batchexecute RPCs inside a signed-in `flow.google.com` tab, which is the only place they can be signed.
+Standalone local system to generate AI videos via Google Flow. A Python FastAPI agent, SQLite database, background worker, local media pipeline, React dashboard, and Chrome MV3 extension work together. The extension runs batchexecute requests inside a real signed-in `flow.google.com` tab; this is not a headless browser integration.
+
+## Current Implementation
+
+- Flow transport: batchexecute through the Chrome extension and signed-in Flow page.
+- Job states: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`.
+- Scene assets: image, video, optional upscale, narration audio, and final narration mix with dependency invalidation.
+- Character references: versioned immutable assets with scene snapshots.
+- YouTube: upload/publish state and idempotency adapter are implemented, but a concrete Google OAuth client is not bundled.
+- Backups: SQLite online backup plus media/config manifest verification; see [`docs/BACKUP_RECOVERY.md`](docs/BACKUP_RECOVERY.md).
+- Deployment: local-first; the interactive Chrome/Flow bridge must run outside a headless container.
 
 ## Showcase
 
@@ -111,18 +121,18 @@ The reference image system keeps characters consistent across an entire video. E
 
 ### What the Pipeline Produces
 
-Each project goes through: **story → entities → reference images → scene images → 8s video clips → narration (TTS) → concat → thumbnails → YouTube upload** — all orchestrated via API or AI agent skills.
+Each project can go through: **story → entities → versioned reference images → scene images → video clips → optional upscale → narration (TTS) → final mix → thumbnails → optional YouTube upload/publish through the configured adapter**.
 
 | Output | Description |
 |--------|-------------|
 | Reference images | One per character/location/prop — maintains visual consistency |
 | Scene images | Composed using all referenced entities |
 | 8-second video clips | Generated from scene images with camera motion + sound effects |
-| 4K upscale | Optional upscale to 4K resolution |
+| Upscale | Optional where the selected Flow capability is supported; unsupported Veo upscale fails explicitly |
 | Narrator TTS | Voice-cloned narration per scene |
 | Final video | All clips concatenated, trimmed to narrator timing |
 | Thumbnails | YouTube-optimized with text overlays + branding |
-| YouTube metadata | SEO-optimized title, description, tags, hashtags |
+| YouTube publishing | Persisted upload/publish state through the mockable YouTube adapter; OAuth client wiring is deployment-specific |
 
 ---
 
@@ -214,6 +224,8 @@ python -m agent.main
 # 5. Verify
 curl http://127.0.0.1:8100/health
 # {"status":"ok","extension_connected":true}
+curl http://127.0.0.1:8100/ready
+# HTTP 200 only when SQLite, media storage, FFmpeg, FFprobe, and the extension are ready
 curl http://127.0.0.1:8100/api/flow/status
 # {"connected":true,"transport":"batch","flow_project_id":"…","flow_key_present":false}
 ```
@@ -230,6 +242,13 @@ You can also pass `flow_project_id` per project on `POST /api/projects`.
 | `FLOW_PROJECT_ID` | — | The Flow project every RPC is scoped to. Required. |
 | `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
 | `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
+| `BACKUP_INTERVAL_SECONDS` | `0` | Optional in-process backup interval; `0` disables it. |
+| `LOG_LEVEL` | `INFO` | Backend log level. |
+
+For production deployment, see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and
+[`docs/BACKUP_RECOVERY.md`](docs/BACKUP_RECOVERY.md). The Chrome/Flow bridge
+requires a real interactive signed-in browser session and is not a headless
+container workload.
 
 ### Image API
 

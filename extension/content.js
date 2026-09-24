@@ -10,9 +10,17 @@
 })();
 
 chrome.runtime.onMessage.addListener((msg, _, reply) => {
-  if (msg.type !== 'GET_CAPTCHA') return;
+  if (!msg || typeof msg !== 'object' || msg.type !== 'GET_CAPTCHA') return;
 
   const { requestId, pageAction } = msg;
+  if (
+    typeof requestId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId) ||
+    typeof pageAction !== 'string' || pageAction.length > 100
+  ) {
+    reply({ error: 'INVALID_CAPTCHA_REQUEST' });
+    return;
+  }
 
   const handler = (e) => {
     if (e.detail?.requestId === requestId) {
@@ -40,7 +48,7 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
 // Forward intercepted TRPC responses with media URLs to background.js
 window.addEventListener('TRPC_MEDIA_URLS', (e) => {
   const { url, body } = e.detail || {};
-  if (!body) return;
+  if (typeof url !== 'string' || !url.startsWith('https://labs.google/') || typeof body !== 'string' || body.length > 20000000) return;
   chrome.runtime.sendMessage({
     type: 'TRPC_MEDIA_URLS',
     trpcUrl: url,

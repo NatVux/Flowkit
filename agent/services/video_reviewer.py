@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -31,6 +32,7 @@ from agent.config import (
     REVIEW_SHEET_COLS,
     REVIEW_SHEET_ROWS,
 )
+from agent.services.media_process import run_media_command, validate_input_file, validate_output_file
 from agent.db.crud import list_scenes, get_project_characters
 from agent.models.review import DimensionScores, SceneReview, SegmentScore, VideoError, VideoReview
 from agent.services.cli_providers import (  # noqa: F401  (PROVIDER_BINARIES re-exported)
@@ -185,10 +187,14 @@ def _extract_frames(video_path: str, fps: float, out_dir: str) -> list:
         "-q:v", "4",
         f"{out_dir}/frame_%04d.jpg",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg frame extraction failed: {result.stderr[-500:]}")
-    return sorted(Path(out_dir).glob("frame_*.jpg"))
+    validate_input_file(video_path, "review video")
+    result = run_media_command(cmd, timeout=120)
+    if not result.ok:
+        raise RuntimeError(f"ffmpeg frame extraction failed: {result.error}")
+    frames = sorted(Path(out_dir).glob("frame_*.jpg"))
+    if not frames or any(path.stat().st_size == 0 for path in frames):
+        raise RuntimeError("ffmpeg produced no valid review frames")
+    return frames
 
 
 def _frame_to_base64(path: Path) -> str:
@@ -205,10 +211,9 @@ def _has_drawtext() -> bool:
     it was there to draw. Probe once and degrade to untimestamped frames.
     """
     try:
-        out = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
-            capture_output=True, text=True, timeout=30,
-        )
+        out = run_media_command(["ffmpeg", "-hide_banner", "-filters"], timeout=30)
+        if not out.ok:
+            raise RuntimeError(out.error or "unable to inspect ffmpeg filters")
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning("Could not list ffmpeg filters (%s) — assuming no drawtext", e)
         return False
@@ -250,21 +255,24 @@ def _create_contact_sheets(
     """
     frames_dir = Path(out_dir) / "frames"
     frames_dir.mkdir(exist_ok=True)
+    for stale_frame in frames_dir.glob("frame_*.jpg"):
+        stale_frame.unlink(missing_ok=True)
+    validate_input_file(video_path, "review video")
 
     def _extract(with_drawtext: bool):
-        return subprocess.run(
+        return run_media_command(
             [
                 "ffmpeg", "-y", "-i", video_path,
                 "-vf", _frame_filter(fps, with_drawtext),
                 "-q:v", "2",
                 f"{frames_dir}/frame_%04d.jpg",
             ],
-            capture_output=True, text=True,
+            timeout=120,
         )
 
     timestamped = _has_drawtext()
     result = _extract(timestamped)
-    if result.returncode != 0 and timestamped:
+    if not result.ok and timestamped:
         # The probe proves drawtext is compiled in, not that it can render. An
         # ffmpeg with libfreetype but no resolvable font lists the filter and
         # then dies on "Cannot find a valid font for the family Sans" — the
@@ -278,10 +286,12 @@ def _create_contact_sheets(
         )
         timestamped = False
         result = _extract(False)
-    if result.returncode != 0:
-        raise RuntimeError(f"Frame extraction failed: {result.stderr[-500:]}")
+    if not result.ok:
+        raise RuntimeError(f"Frame extraction failed: {result.error}")
 
     frames = sorted(frames_dir.glob("frame_*.jpg"))
+    if not frames or any(frame.stat().st_size == 0 for frame in frames):
+        raise RuntimeError("Frame extraction produced no valid frames")
     if len(frames) > REVIEW_MAX_FRAMES:
         step = len(frames) / REVIEW_MAX_FRAMES
         frames = [frames[int(i * step)] for i in range(REVIEW_MAX_FRAMES)]
@@ -308,10 +318,14 @@ def _create_contact_sheets(
             "-vf", f"tile={cols_eff}x{rows_eff}:nb_frames={len(chunk)}",
             "-q:v", "2", str(output),
         ]
-        result = subprocess.run(tile_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Contact sheet tiling failed: {result.stderr[-500:]}")
-        sheets.append(output)
+        try:
+            result = run_media_command(tile_cmd, timeout=120, output_path=output)
+            if not result.ok:
+                raise RuntimeError(f"Contact sheet tiling failed: {result.error}")
+            validate_output_file(output, "contact sheet")
+            sheets.append(output)
+        finally:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
 
     return sheets, len(frames), timestamped
 

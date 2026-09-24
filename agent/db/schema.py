@@ -2,6 +2,7 @@
 import asyncio
 import aiosqlite
 import logging
+from contextlib import asynccontextmanager
 from agent.config import DB_PATH
 
 logger = logging.getLogger(__name__)
@@ -10,6 +11,11 @@ _db_connection: aiosqlite.Connection | None = None
 _db_lock = asyncio.Lock()
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_migration (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS character (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -22,6 +28,33 @@ CREATE TABLE IF NOT EXISTS character (
     media_id TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS character_reference_asset (
+    id            TEXT PRIMARY KEY,
+    character_id  TEXT NOT NULL REFERENCES character(id) ON DELETE RESTRICT,
+    version       INTEGER NOT NULL,
+    media_id      TEXT NOT NULL,
+    reference_image_url TEXT,
+    source_file   TEXT,
+    metadata_json TEXT,
+    status        TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','RETIRED','INVALID')),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    retired_at    TEXT,
+    UNIQUE(character_id, version),
+    UNIQUE(character_id, media_id)
+);
+
+CREATE TABLE IF NOT EXISTS scene_character_reference (
+    scene_id       TEXT NOT NULL REFERENCES scene(id) ON DELETE CASCADE,
+    character_id   TEXT NOT NULL REFERENCES character(id) ON DELETE RESTRICT,
+    reference_id   TEXT NOT NULL REFERENCES character_reference_asset(id) ON DELETE RESTRICT,
+    version        INTEGER NOT NULL,
+    media_id       TEXT NOT NULL,
+    reference_image_url TEXT,
+    metadata_json  TEXT,
+    captured_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY(scene_id, character_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS project (
@@ -127,6 +160,11 @@ CREATE TABLE IF NOT EXISTS scene (
 
     -- Narration
     narrator_text TEXT,
+    narration_audio_path TEXT,
+    narration_audio_duration REAL,
+    narration_audio_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(narration_audio_status IN ('PENDING','PROCESSING','COMPLETED','FAILED')),
+    narration_mix_path TEXT,
+    narration_mix_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(narration_mix_status IN ('PENDING','PROCESSING','COMPLETED','FAILED')),
 
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -147,6 +185,9 @@ CREATE TABLE IF NOT EXISTS request (
     error_message TEXT,
     retry_count   INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
+    started_at    TEXT,
+    finished_at   TEXT,
+    last_failure_reason TEXT,
     edit_prompt   TEXT,    -- prompt for EDIT_IMAGE requests
     source_media_id TEXT,  -- source image media_id for EDIT_IMAGE requests
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -158,7 +199,119 @@ CREATE INDEX IF NOT EXISTS idx_scene_order ON scene(video_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);
 CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
 CREATE INDEX IF NOT EXISTS idx_video_project ON video(project_id);
+CREATE INDEX IF NOT EXISTS idx_reference_character ON character_reference_asset(character_id, version);
+CREATE INDEX IF NOT EXISTS idx_scene_character_reference_character ON scene_character_reference(character_id, version);
 """
+
+_INTEGRITY_MIGRATION = """
+CREATE INDEX IF NOT EXISTS idx_request_queue ON request(status, next_retry_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_request_video_status ON request(video_id, status);
+CREATE INDEX IF NOT EXISTS idx_request_project_status ON request(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_scene_parent ON scene(parent_scene_id);
+CREATE INDEX IF NOT EXISTS idx_project_character_character ON project_character(character_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_scene_narration_status_insert
+BEFORE INSERT ON scene
+WHEN NEW.narration_audio_status NOT IN ('PENDING','PROCESSING','COMPLETED','FAILED')
+    OR NEW.narration_mix_status NOT IN ('PENDING','PROCESSING','COMPLETED','FAILED')
+BEGIN SELECT RAISE(ABORT, 'invalid narration lifecycle status'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_scene_narration_status_update
+BEFORE UPDATE OF narration_audio_status, narration_mix_status ON scene
+WHEN NEW.narration_audio_status NOT IN ('PENDING','PROCESSING','COMPLETED','FAILED')
+    OR NEW.narration_mix_status NOT IN ('PENDING','PROCESSING','COMPLETED','FAILED')
+BEGIN SELECT RAISE(ABORT, 'invalid narration lifecycle status'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_character_slug_unique_insert
+BEFORE INSERT ON character
+WHEN NEW.slug IS NOT NULL AND NEW.slug <> '' AND EXISTS (
+    SELECT 1 FROM character WHERE slug = NEW.slug
+)
+BEGIN SELECT RAISE(ABORT, 'character slug already exists'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_character_slug_unique_update
+BEFORE UPDATE OF slug ON character
+WHEN NEW.slug IS NOT NULL AND NEW.slug <> '' AND EXISTS (
+    SELECT 1 FROM character WHERE slug = NEW.slug AND id <> NEW.id
+)
+BEGIN SELECT RAISE(ABORT, 'character slug already exists'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_active_scene_request_unique_insert
+BEFORE INSERT ON request
+WHEN NEW.scene_id IS NOT NULL AND NEW.status IN ('PENDING', 'PROCESSING') AND EXISTS (
+    SELECT 1 FROM request WHERE scene_id = NEW.scene_id AND type = NEW.type AND status IN ('PENDING', 'PROCESSING')
+)
+BEGIN SELECT RAISE(ABORT, 'active scene request already exists'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_active_scene_request_unique_update
+BEFORE UPDATE OF scene_id, type, status ON request
+WHEN NEW.scene_id IS NOT NULL AND NEW.status IN ('PENDING', 'PROCESSING') AND EXISTS (
+    SELECT 1 FROM request WHERE scene_id = NEW.scene_id AND type = NEW.type AND status IN ('PENDING', 'PROCESSING') AND id <> NEW.id
+)
+BEGIN SELECT RAISE(ABORT, 'active scene request already exists'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_active_character_request_unique_insert
+BEFORE INSERT ON request
+WHEN NEW.character_id IS NOT NULL AND NEW.status IN ('PENDING', 'PROCESSING') AND EXISTS (
+    SELECT 1 FROM request WHERE character_id = NEW.character_id AND type = NEW.type AND status IN ('PENDING', 'PROCESSING')
+)
+BEGIN SELECT RAISE(ABORT, 'active character request already exists'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_active_character_request_unique_update
+BEFORE UPDATE OF character_id, type, status ON request
+WHEN NEW.character_id IS NOT NULL AND NEW.status IN ('PENDING', 'PROCESSING') AND EXISTS (
+    SELECT 1 FROM request WHERE character_id = NEW.character_id AND type = NEW.type AND status IN ('PENDING', 'PROCESSING') AND id <> NEW.id
+)
+BEGIN SELECT RAISE(ABORT, 'active character request already exists'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_scene_parent_same_video_insert
+BEFORE INSERT ON scene
+WHEN NEW.parent_scene_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM scene parent WHERE parent.id = NEW.parent_scene_id AND parent.video_id = NEW.video_id
+)
+BEGIN SELECT RAISE(ABORT, 'parent_scene_id must belong to the same video'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_scene_parent_same_video_update
+BEFORE UPDATE OF video_id, parent_scene_id ON scene
+WHEN NEW.parent_scene_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM scene parent WHERE parent.id = NEW.parent_scene_id AND parent.video_id = NEW.video_id
+)
+BEGIN SELECT RAISE(ABORT, 'parent_scene_id must belong to the same video'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_request_video_project_insert
+BEFORE INSERT ON request
+WHEN NEW.video_id IS NOT NULL AND (NEW.project_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM video WHERE id = NEW.video_id AND project_id = NEW.project_id
+))
+BEGIN SELECT RAISE(ABORT, 'request video must belong to request project'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_request_video_project_update
+BEFORE UPDATE OF project_id, video_id ON request
+WHEN NEW.video_id IS NOT NULL AND (NEW.project_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM video WHERE id = NEW.video_id AND project_id = NEW.project_id
+))
+BEGIN SELECT RAISE(ABORT, 'request video must belong to request project'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_request_scene_video_insert
+BEFORE INSERT ON request
+WHEN NEW.scene_id IS NOT NULL AND (NEW.video_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM scene WHERE id = NEW.scene_id AND video_id = NEW.video_id
+))
+BEGIN SELECT RAISE(ABORT, 'request scene must belong to request video'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_request_scene_video_update
+BEFORE UPDATE OF video_id, scene_id ON request
+WHEN NEW.scene_id IS NOT NULL AND (NEW.video_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM scene WHERE id = NEW.scene_id AND video_id = NEW.video_id
+))
+BEGIN SELECT RAISE(ABORT, 'request scene must belong to request video'); END;
+"""
+
+_UNIQUE_INDEX_MIGRATIONS = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_character_slug ON character(slug) WHERE slug IS NOT NULL AND slug <> ''",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_scene_request ON request(scene_id, type) WHERE scene_id IS NOT NULL AND status IN ('PENDING', 'PROCESSING')",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_character_request ON request(character_id, type) WHERE character_id IS NOT NULL AND status IN ('PENDING', 'PROCESSING')",
+)
 
 
 async def init_db():
@@ -206,6 +359,10 @@ async def init_db():
         if "retry_count" not in request_columns:
             await db.execute("ALTER TABLE request ADD COLUMN retry_count INTEGER DEFAULT 0")
             logger.info("Migrated: added retry_count column to request table")
+        for column in ("started_at", "finished_at", "last_failure_reason"):
+            if column not in request_columns:
+                await db.execute(f"ALTER TABLE request ADD COLUMN {column} TEXT")
+                logger.info("Migrated: added %s column to request table", column)
         # Migration: ensure request table CHECK constraint includes all request types
         # SQLite can't alter CHECK constraints, so recreate the table
         cursor = await db.execute("SELECT sql FROM sqlite_master WHERE name='request' AND type='table'")
@@ -236,6 +393,9 @@ CREATE TABLE IF NOT EXISTS request (
     error_message TEXT,
     retry_count   INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
+    started_at    TEXT,
+    finished_at   TEXT,
+    last_failure_reason TEXT,
     edit_prompt   TEXT,
     source_media_id TEXT,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -244,7 +404,22 @@ CREATE TABLE IF NOT EXISTS request (
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);
 CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
 """)
-            await db.execute("INSERT OR IGNORE INTO request SELECT * FROM _request_old")
+            await db.execute("""
+                INSERT INTO request (
+                    id, project_id, video_id, scene_id, character_id, type,
+                    orientation, status, request_id, media_id, output_url,
+                    error_message, retry_count, next_retry_at, started_at,
+                    finished_at, last_failure_reason, edit_prompt,
+                    source_media_id, created_at, updated_at
+                )
+                SELECT
+                    id, project_id, video_id, scene_id, character_id, type,
+                    orientation, status, request_id, media_id, output_url,
+                    error_message, retry_count, next_retry_at, started_at,
+                    finished_at, last_failure_reason, edit_prompt,
+                    source_media_id, created_at, updated_at
+                FROM _request_old
+            """)
             await db.execute("UPDATE request SET type='GENERATE_IMAGE' WHERE type='GENERATE_IMAGES'")
             await db.execute("DROP TABLE _request_old")
             await db.execute("PRAGMA foreign_keys=ON")
@@ -258,6 +433,16 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
         if "narrator_text" not in scene_columns:
             await db.execute("ALTER TABLE scene ADD COLUMN narrator_text TEXT")
             logger.info("Migrated: added narrator_text column to scene table")
+        for column, definition in (
+            ("narration_audio_path", "TEXT"),
+            ("narration_audio_duration", "REAL"),
+            ("narration_audio_status", "TEXT NOT NULL DEFAULT 'PENDING'"),
+            ("narration_mix_path", "TEXT"),
+            ("narration_mix_status", "TEXT NOT NULL DEFAULT 'PENDING'"),
+        ):
+            if column not in scene_columns:
+                await db.execute(f"ALTER TABLE scene ADD COLUMN {column} {definition}")
+                logger.info("Migrated: added %s column to scene table", column)
         # Migration: add narrator fields to project table
         cursor = await db.execute("PRAGMA table_info(project)")
         project_columns = {row[1] for row in await cursor.fetchall()}
@@ -302,6 +487,15 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
     negative_prompt TEXT, scene_prefix TEXT, lighting TEXT DEFAULT 'Studio lighting, highly detailed',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))""")
             logger.info("Migrated: created material table")
+        await db.executescript(_INTEGRITY_MIGRATION)
+        for statement in _UNIQUE_INDEX_MIGRATIONS:
+            try:
+                await db.execute(statement)
+            except aiosqlite.IntegrityError as exc:
+                # Existing duplicates are retained; an operator must resolve
+                # them explicitly before this index can be installed.
+                logger.warning("Skipped unique index migration (%s): %s", statement, exc)
+        await db.execute("INSERT OR IGNORE INTO schema_migration(version) VALUES (1)")
         await db.commit()
     logger.info("Database initialized at %s", DB_PATH)
 
@@ -314,16 +508,31 @@ async def get_db() -> aiosqlite.Connection:
         _db_connection.row_factory = aiosqlite.Row
         await _db_connection.execute("PRAGMA journal_mode=WAL")
         await _db_connection.execute("PRAGMA foreign_keys=ON")
+        await _db_connection.execute("PRAGMA busy_timeout=5000")
         # Force WAL checkpoint so this connection sees all committed writes
         # from previous processes (e.g. after hot-reload)
         await _db_connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
     return _db_connection
 
 
+@asynccontextmanager
+async def transaction(db: aiosqlite.Connection):
+    """Run a write transaction and rollback failed mutations."""
+    await db.execute("BEGIN")
+    try:
+        yield db
+    except Exception:
+        await db.rollback()
+        raise
+    else:
+        await db.commit()
+
+
 async def close_db() -> None:
     """Close the shared database connection."""
-    global _db_connection
+    global _db_connection, _db_lock
     if _db_connection is not None:
         await _db_connection.close()
         _db_connection = None
         logger.info("Database connection closed")
+    _db_lock = asyncio.Lock()

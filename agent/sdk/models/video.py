@@ -29,6 +29,14 @@ class Video(DomainModel):
     duration: Optional[float] = None
     resolution: Optional[str] = None
     youtube_id: Optional[str] = None
+    upload_url: Optional[str] = None
+    youtube_upload_status: str = "NOT_STARTED"
+    youtube_upload_error: Optional[str] = None
+    youtube_upload_attempts: int = 0
+    youtube_uploaded_at: Optional[str] = None
+    youtube_publish_status: str = "NOT_PUBLISHED"
+    youtube_publish_error: Optional[str] = None
+    youtube_published_at: Optional[str] = None
     privacy: str = "unlisted"
     tags: Optional[str] = None
     created_at: Optional[str] = None

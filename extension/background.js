@@ -32,6 +32,10 @@ let ws = null;
 let flowKey = null;
 let callbackSecret = null;  // Auth secret for HTTP callback, received from server on WS connect
 let state = 'off'; // off | idle | running
+let flowTabId = null;
+let flowTabAvailable = false;
+const activeRequestIds = new Set();
+const completedRequestIds = new Set();
 let manualDisconnect = false;
 let metrics = {
   tokenCapturedAt: null,
@@ -100,6 +104,24 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === flowTabId) {
+    flowTabId = null;
+    flowTabAvailable = false;
+    publishDiagnosticStatus();
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tabId !== flowTabId && !isFlowUrl(tab.url)) return;
+  if (changeInfo.status === 'loading' || !isFlowUrl(tab.url)) {
+    flowTabAvailable = false;
+    publishDiagnosticStatus();
+  } else if (changeInfo.status === 'complete') {
+    void refreshFlowTabStatus();
+  }
+});
+
 function ensureInitialized() {
   if (!initializationPromise) {
     initializationPromise = initialize().catch((error) => {
@@ -112,46 +134,18 @@ function ensureInitialized() {
 }
 
 async function initialize() {
-  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret']);
-  if (data.flowKey) flowKey = data.flowKey;
+  const data = await chrome.storage.local.get(['metrics', 'callbackSecret', 'recentRequestIds']);
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
+  for (const id of data.recentRequestIds || []) if (typeof id === 'string') completedRequestIds.add(id);
   connectToAgent();
+  await refreshFlowTabStatus();
   chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 });
 }
 
 // MV3 workers can be suspended and restarted without onStartup firing.
 // Rehydrate the persisted Flow key on every worker start.
 void ensureInitialized();
-
-// ─── Token Capture ──────────────────────────────────────────
-
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    if (!details?.requestHeaders?.length) return;
-    const authHeader = details.requestHeaders.find(
-      (h) => h.name?.toLowerCase() === 'authorization',
-    );
-    const value = authHeader?.value || '';
-    if (!value.startsWith('Bearer ya29.')) return;
-
-    const token = value.replace(/^Bearer\s+/i, '').trim();
-    if (!token) return;
-
-    // Always update — even if same token string, refresh the timestamp
-    flowKey = token;
-    metrics.tokenCapturedAt = Date.now();
-    chrome.storage.local.set({ flowKey, metrics });
-    console.log('[FlowAgent] Bearer token captured');
-
-    // Notify agent
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
-    }
-  },
-  { urls: ['https://aisandbox-pa.googleapis.com/*', 'https://labs.google/*'] },
-  ['requestHeaders', 'extraHeaders'],
-);
 
 let _openingFlowTab = false;
 
@@ -229,6 +223,9 @@ function connectToAgent() {
       extensionVersion: chrome.runtime.getManifest().version,
       flowUrlSupported: chrome.runtime.getManifest().host_permissions?.includes('https://flow.google.com/*') === true,
       tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
+      status: getDiagnosticStatus(),
+      flowTabAvailable,
+      busy: activeRequestIds.size > 0 || state === 'running',
     }));
     if (flowKey) {
       ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
@@ -238,15 +235,20 @@ function connectToAgent() {
   ws.onmessage = async ({ data }) => {
     try {
       const msg = JSON.parse(data);
+      if (!validateBackendMessage(msg)) {
+        metrics.lastError = 'INVALID_AGENT_MESSAGE';
+        await chrome.storage.local.set({ metrics });
+        return;
+      }
 
       if (msg.method === 'batch_rpc') {
-        await handleBatchRpc(msg);
+        await dispatchRequest(msg, handleBatchRpc);
       } else if (msg.method === 'api_request') {
-        await handleApiRequest(msg);
+        await dispatchRequest(msg, handleApiRequest);
       } else if (msg.method === 'trpc_request') {
-        await handleTrpcRequest(msg);
+        await dispatchRequest(msg, handleTrpcRequest);
       } else if (msg.method === 'solve_captcha') {
-        await handleSolveCaptcha(msg);
+        await dispatchRequest(msg, handleSolveCaptcha);
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,
@@ -298,9 +300,11 @@ function keepAlive() {
 function sendToAgent(msg) {
   // API responses (with msg.id) go via HTTP — immune to WS disconnect
   if (msg.id) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (callbackSecret) headers['X-Callback-Secret'] = callbackSecret;
     fetch('http://127.0.0.1:8100/api/ext/callback', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(msg),
     }).catch(() => {
       // HTTP failed — fallback to WS
@@ -311,6 +315,35 @@ function sendToAgent(msg) {
   // Non-response messages (ping, status) or no secret yet — use WS
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
+  }
+}
+
+function validateBackendMessage(msg) {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return false;
+  if (msg.type === 'callback_secret' || msg.type === 'pong') return true;
+  if (msg.type === 'ping') return true;
+  if (msg.method) {
+    if (!['batch_rpc', 'api_request', 'trpc_request', 'solve_captcha', 'get_status'].includes(msg.method)) return false;
+    if (typeof msg.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(msg.id)) return false;
+    return msg.method === 'get_status' || (msg.params && typeof msg.params === 'object' && !Array.isArray(msg.params));
+  }
+  return false;
+}
+
+async function dispatchRequest(msg, handler) {
+  if (activeRequestIds.has(msg.id) || completedRequestIds.has(msg.id)) {
+    sendToAgent({ id: msg.id, status: 409, error: 'DUPLICATE_REQUEST_ID' });
+    return;
+  }
+  activeRequestIds.add(msg.id);
+  try {
+    await handler(msg);
+  } finally {
+    activeRequestIds.delete(msg.id);
+    completedRequestIds.add(msg.id);
+    while (completedRequestIds.size > 500) completedRequestIds.delete(completedRequestIds.values().next().value);
+    await chrome.storage.local.set({ recentRequestIds: [...completedRequestIds] });
+    await refreshFlowTabStatus();
   }
 }
 
@@ -778,14 +811,61 @@ function setState(newState) {
   chrome.action.setBadgeText({ text: badges[state] || '' });
   chrome.action.setBadgeBackgroundColor({ color: colors[state] || '#000' });
   broadcastStatus();
+  publishDiagnosticStatus();
 }
 
 function broadcastStatus() {
   chrome.runtime.sendMessage({ type: 'STATUS_PUSH' }).catch(() => {});
 }
 
+function isFlowUrl(url) {
+  if (typeof url !== 'string') return false;
+  return flowUrls.some((pattern) => {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    const expression = new RegExp('^' + escaped.replace(/\*/g, '.*') + '$');
+    return expression.test(url);
+  });
+}
+
+function getDiagnosticStatus() {
+  if (ws?.readyState !== WebSocket.OPEN) return 'disconnected';
+  if (!flowTabAvailable) return 'flow_tab_unavailable';
+  if (activeRequestIds.size || state === 'running') return 'busy';
+  return 'flow_tab_available';
+}
+
+async function refreshFlowTabStatus() {
+  try {
+    const tabs = await chrome.tabs.query({ url: flowUrls });
+    const tab = tabs.find((candidate) => !candidate.discarded) || tabs[0];
+    flowTabId = tab?.id ?? null;
+    flowTabAvailable = Boolean(tab && !tab.discarded && isFlowUrl(tab.url));
+  } catch {
+    flowTabId = null;
+    flowTabAvailable = false;
+  }
+  publishDiagnosticStatus();
+  return flowTabAvailable;
+}
+
+function publishDiagnosticStatus() {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: 'extension_status',
+    status: getDiagnosticStatus(),
+    flowTabAvailable,
+    flowTabId: flowTabId == null ? null : flowTabId,
+    busy: activeRequestIds.size > 0 || state === 'running',
+  }));
+}
+
 chrome.runtime.onMessage.addListener((msg, _, reply) => {
+  if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') {
+    reply({ error: 'INVALID_EXTENSION_MESSAGE' });
+    return false;
+  }
   if (msg.type === 'STATUS') {
+    refreshFlowTabStatus();
     reply({
       connected: ws?.readyState === WebSocket.OPEN,
       agentConnected: ws?.readyState === WebSocket.OPEN,
@@ -799,6 +879,10 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
         lastError: metrics.lastError,
       },
       state,
+      status: getDiagnosticStatus(),
+      flowTabAvailable,
+      flowTabId,
+      busy: activeRequestIds.size > 0 || state === 'running',
     });
   }
 
@@ -843,6 +927,10 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'TEST_CAPTCHA') {
+    if (typeof msg.pageAction !== 'undefined' && (typeof msg.pageAction !== 'string' || msg.pageAction.length > 100)) {
+      reply({ error: 'INVALID_PAGE_ACTION' });
+      return false;
+    }
     solveCaptcha(`test-${Date.now()}`, msg.pageAction || 'IMAGE_GENERATION')
       .then((r) => reply(r))
       .catch((e) => reply({ error: e.message }));
@@ -850,6 +938,10 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'TRPC_MEDIA_URLS') {
+    if (typeof msg.trpcUrl !== 'string' || !msg.trpcUrl.startsWith('https://labs.google/') || typeof msg.body !== 'string' || msg.body.length > 20000000) {
+      reply({ error: 'INVALID_MEDIA_URL_EVENT' });
+      return false;
+    }
     handleTrpcMediaUrls(msg.trpcUrl, msg.body);
     reply({ ok: true });
     return true;

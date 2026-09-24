@@ -10,6 +10,24 @@ if TYPE_CHECKING:
     from agent.sdk.models.media import GenerationResult
 
 
+async def invalidate_scene_dependents(scene_id: str, orientation: str, asset: str) -> None:
+    """Clear database references to assets derived from an upstream asset."""
+    p = "vertical" if orientation == "VERTICAL" else "horizontal"
+    updates = {"narration_mix_path": None, "narration_mix_status": "PENDING"}
+    if asset == "image":
+        updates.update({
+            f"{p}_video_media_id": None, f"{p}_video_url": None, f"{p}_video_status": "PENDING",
+            f"{p}_upscale_media_id": None, f"{p}_upscale_url": None, f"{p}_upscale_status": "PENDING",
+        })
+    elif asset == "video":
+        updates.update({
+            f"{p}_upscale_media_id": None, f"{p}_upscale_url": None, f"{p}_upscale_status": "PENDING",
+        })
+    else:
+        raise ValueError(f"Unknown scene asset dependency: {asset}")
+    await crud.update_scene(scene_id, **updates)
+
+
 def parse_result(raw: dict, req_type: str) -> GenerationResult:
     """Parse a raw FlowClient/OperationService response into a GenerationResult."""
     from agent.sdk.models.media import GenerationResult
@@ -27,6 +45,12 @@ def parse_result(raw: dict, req_type: str) -> GenerationResult:
 
     media_id = _extract_media_id(raw, req_type)
     url = _extract_output_url(raw, req_type)
+    if not media_id or not url:
+        return GenerationResult(
+            success=False,
+            error="Generation response did not contain a valid media id and output URL",
+            raw=raw,
+        )
     return GenerationResult(success=True, media_id=media_id, url=url, raw=raw)
 
 
@@ -55,6 +79,7 @@ async def apply_scene_result(
             # Cascade: clear downstream
             f"{p}_video_media_id": None, f"{p}_video_url": None, f"{p}_video_status": "PENDING",
             f"{p}_upscale_media_id": None, f"{p}_upscale_url": None, f"{p}_upscale_status": "PENDING",
+            "narration_mix_path": None, "narration_mix_status": "PENDING",
         })
         # Chain cascade: update parent's end_scene_media_id so its video
         # transitions to this child's new image
@@ -69,8 +94,8 @@ async def apply_scene_result(
             f"{p}_video_media_id": result.media_id,
             f"{p}_video_url": result.url,
             f"{p}_video_status": "COMPLETED",
-            # Cascade: clear upscale
             f"{p}_upscale_media_id": None, f"{p}_upscale_url": None, f"{p}_upscale_status": "PENDING",
+            "narration_mix_path": None, "narration_mix_status": "PENDING",
         })
     elif req_type == "UPSCALE_VIDEO":
         updates.update({
@@ -97,3 +122,23 @@ async def apply_character_result(
         updates["reference_image_url"] = result.url
     if updates:
         await crud.update_character(character_id, **updates)
+        if result.media_id:
+            await crud.save_character_reference(
+                character_id,
+                result.media_id,
+                reference_image_url=result.url,
+                metadata={"source": "flow_generation"},
+            )
+        # A new reference changes every dependent scene image. Keep old media
+        # files on disk, but remove their DB references so downstream workers
+        # cannot treat stale video or final mixes as current.
+        for scene in await crud.list_scenes_for_character(character_id):
+            await crud.update_scene(scene["id"], **{
+                "vertical_image_media_id": None, "vertical_image_url": None, "vertical_image_status": "PENDING",
+                "vertical_video_media_id": None, "vertical_video_url": None, "vertical_video_status": "PENDING",
+                "vertical_upscale_media_id": None, "vertical_upscale_url": None, "vertical_upscale_status": "PENDING",
+                "horizontal_image_media_id": None, "horizontal_image_url": None, "horizontal_image_status": "PENDING",
+                "horizontal_video_media_id": None, "horizontal_video_url": None, "horizontal_video_status": "PENDING",
+                "horizontal_upscale_media_id": None, "horizontal_upscale_url": None, "horizontal_upscale_status": "PENDING",
+                "narration_mix_path": None, "narration_mix_status": "PENDING",
+            })

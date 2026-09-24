@@ -8,7 +8,7 @@ const source = fs.readFileSync(
   'utf8',
 );
 
-const lifecycleListeners = { alarm: [], installed: [], startup: [] };
+const lifecycleListeners = { alarm: [], installed: [], startup: [], tabRemoved: [], tabUpdated: [] };
 const sockets = [];
 let storageReads = 0;
 let tabCreates = 0;
@@ -59,7 +59,6 @@ const chrome = {
         storageReads += 1;
         return {
           callbackSecret: 'persisted-secret',
-          flowKey: 'persisted-flow-key',
           metrics: { tokenCapturedAt: 1234 },
         };
       },
@@ -77,8 +76,9 @@ const chrome = {
     remove: async () => {},
     sendMessage: async () => {},
     update: async () => {},
+    onRemoved: event(lifecycleListeners.tabRemoved),
+    onUpdated: event(lifecycleListeners.tabUpdated),
   },
-  webRequest: { onBeforeSendHeaders: event() },
 };
 
 const context = vm.createContext({
@@ -117,14 +117,12 @@ setImmediate(async () => {
   assert.equal(tabCreates, 0, 'passive token refresh must never create a Flow tab');
 
   assert.equal(socket.messages[0].type, 'extension_ready');
-  assert.equal(socket.messages[0].flowKeyPresent, true);
+  assert.equal(socket.messages[0].flowKeyPresent, false);
   assert.equal(socket.messages[0].extensionVersion, '0.3.1');
   assert.equal(socket.messages[0].flowUrlSupported, true);
-  assert.ok(socket.messages[0].tokenAge > 0);
-  assert.deepEqual(socket.messages[1], {
-    type: 'token_captured',
-    flowKey: 'persisted-flow-key',
-  });
+  assert.equal(socket.messages[0].tokenAge, null);
+  assert.equal(socket.messages[1].type, 'extension_status');
+  assert.equal(socket.messages[1].status, 'flow_tab_unavailable');
 
   console.log('Flowkit MV3 cold-start bootstrap regression test passed');
 });

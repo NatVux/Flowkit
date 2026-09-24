@@ -7,9 +7,7 @@
     "storage",
     "alarms",
     "tabs",
-    "webRequest",
     "scripting",
-    "declarativeNetRequest",
     "sidePanel"
   ],
   "host_permissions": [
@@ -46,15 +44,6 @@
       ]
     }
   ],
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "referer_rules",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
   "side_panel": {
     "default_path": "side_panel.html"
   },

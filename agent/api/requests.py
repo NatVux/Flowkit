@@ -4,6 +4,7 @@ from typing import Optional
 from agent.models.request import Request, RequestCreate
 from agent.models.enums import StatusType
 from agent.db import crud
+from agent.api.validation import validate_id
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -34,6 +35,9 @@ class BatchStatus(BaseModel):
 @router.post("", response_model=Request)
 async def create(body: RequestCreate):
     data = body.model_dump(exclude_none=True)
+    for key in ("project_id", "video_id", "scene_id", "character_id"):
+        if data.get(key):
+            validate_id(data[key], key)
     data["req_type"] = data.pop("type")
 
     # Reject if there's already an active request for the same scene + type
@@ -75,6 +79,9 @@ async def create_batch(body: BatchRequestCreate):
     results = []
     for item in body.requests:
         data = item.model_dump(exclude_none=True)
+        for key in ("project_id", "video_id", "scene_id", "character_id"):
+            if data.get(key):
+                validate_id(data[key], key)
         data["req_type"] = data.pop("type")
         scene_id = data.get("scene_id")
         character_id = data.get("character_id")

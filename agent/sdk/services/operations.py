@@ -8,6 +8,7 @@ status tracking.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import base64
 import json
 import logging
@@ -313,6 +314,13 @@ class OperationService:
         self._client = flow_client
         self._repo = repo
 
+    async def _persist_reference_version(self, character_id: str, media_id: str, url: str | None, source: str) -> None:
+        result = crud.save_character_reference(
+            character_id, media_id, reference_image_url=url, metadata={"source": source},
+        )
+        if inspect.isawaitable(result):
+            await result
+
     # ------------------------------------------------------------------
     # Scene image operations
     # ------------------------------------------------------------------
@@ -358,6 +366,19 @@ class OperationService:
 
                 char_media_ids = valid_ids if valid_ids else None
                 if char_media_ids:
+                    matched_character_ids = [
+                        c["id"] for c in project_chars
+                        if _char_matches(c, char_names_set) and c.get("media_id")
+                    ]
+                    try:
+                        capture_result = crud.capture_scene_character_references(
+                            scene["id"], matched_character_ids,
+                        )
+                        snapshots = await capture_result if inspect.isawaitable(capture_result) else None
+                        if isinstance(snapshots, list):
+                            char_media_ids = [asset["media_id"] for asset in snapshots]
+                    except ValueError as exc:
+                        return {"error": str(exc)}
                     logger.info("Scene %s: using %d reference images",
                                 scene.get("id", "?")[:8], len(char_media_ids))
 
@@ -431,7 +452,7 @@ class OperationService:
         """Generate video from a scene image (i2v). Submits + polls."""
         prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
         image_media_id = scene.get(f"{prefix}_image_media_id")
-        if not image_media_id:
+        if scene.get(f"{prefix}_image_status") != "COMPLETED" or not image_media_id:
             return {"error": f"No {prefix} image media_id for scene"}
 
         project = await crud.get_project(scene.get("_project_id", "0"))
@@ -614,7 +635,7 @@ class OperationService:
         """
         prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
         video_media_id = scene.get(f"{prefix}_video_media_id")
-        if not video_media_id:
+        if scene.get(f"{prefix}_video_status") != "COMPLETED" or not video_media_id:
             return {"error": f"No {prefix} video media_id for scene"}
 
         aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
@@ -709,6 +730,7 @@ class OperationService:
 
             if upload_mid:
                 await crud.update_character(char["id"], media_id=upload_mid)
+                await self._persist_reference_version(char["id"], upload_mid, existing_url, "reference_upload_retry")
                 logger.info("%s '%s' upload retry succeeded: media_id=%s",
                             entity_type, char["name"], upload_mid[:30])
                 return {"data": {"media": [{"name": upload_mid}]}}
@@ -716,6 +738,7 @@ class OperationService:
             uuid_from_url = _extract_uuid_from_url(existing_url)
             if uuid_from_url:
                 await crud.update_character(char["id"], media_id=uuid_from_url)
+                await self._persist_reference_version(char["id"], uuid_from_url, existing_url, "legacy_url_recovery")
                 logger.info("%s '%s' extracted UUID from URL: media_id=%s",
                             entity_type, char["name"], uuid_from_url)
                 return {"data": {"media": [{"name": uuid_from_url}]}}
@@ -741,6 +764,7 @@ class OperationService:
                 direct_mid = _extract_media_id(result, "GENERATE_IMAGE")
                 if direct_mid and _is_uuid(direct_mid):
                     await crud.update_character(char["id"], media_id=direct_mid, reference_image_url=output_url)
+                    await self._persist_reference_version(char["id"], direct_mid, output_url, "flow_generation")
                     logger.info("%s '%s' ref image ready (no upload needed, %s): media_id=%s",
                                 entity_type, char["name"], aspect.split("_")[-1].lower(), direct_mid)
                     return result
@@ -752,6 +776,7 @@ class OperationService:
 
                 if upload_mid:
                     await crud.update_character(char["id"], media_id=upload_mid, reference_image_url=output_url)
+                    await self._persist_reference_version(char["id"], upload_mid, output_url, "flow_generation_upload")
                     logger.info("%s '%s' ref image uploaded (%s): media_id=%s",
                                 entity_type, char["name"], aspect.split("_")[-1].lower(),
                                 upload_mid[:30] if upload_mid else "?")
@@ -760,6 +785,7 @@ class OperationService:
                     uuid_from_url = _extract_uuid_from_url(output_url)
                     if uuid_from_url:
                         await crud.update_character(char["id"], media_id=uuid_from_url)
+                        await self._persist_reference_version(char["id"], uuid_from_url, output_url, "flow_url_recovery")
                         logger.info("%s '%s' extracted UUID from URL fallback: media_id=%s",
                                     entity_type, char["name"], uuid_from_url)
                         return {"data": {"media": [{"name": uuid_from_url}]}}

@@ -44,6 +44,11 @@ class Scene(DomainModel):
     video_prompt: Optional[str] = None
     transition_prompt: Optional[str] = None
     narrator_text: Optional[str] = None
+    narration_audio_path: Optional[str] = None
+    narration_audio_duration: Optional[float] = None
+    narration_audio_status: str = "PENDING"
+    narration_mix_path: Optional[str] = None
+    narration_mix_status: str = "PENDING"
     character_names: Optional[list[str]] = field(default=None)
     parent_scene_id: Optional[str] = None
     chain_type: str = "ROOT"
@@ -84,6 +89,11 @@ class Scene(DomainModel):
             video_prompt=row.get("video_prompt"),
             transition_prompt=row.get("transition_prompt"),
             narrator_text=row.get("narrator_text"),
+            narration_audio_path=row.get("narration_audio_path"),
+            narration_audio_duration=row.get("narration_audio_duration"),
+            narration_audio_status=row.get("narration_audio_status", "PENDING"),
+            narration_mix_path=row.get("narration_mix_path"),
+            narration_mix_status=row.get("narration_mix_status", "PENDING"),
             character_names=names_raw,
             parent_scene_id=row.get("parent_scene_id"),
             chain_type=row.get("chain_type", "ROOT"),

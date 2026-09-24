@@ -43,9 +43,9 @@ async def review_video_endpoint(
     logger.info("Starting %s review for video %s (project %s, %s, scenes=%s)", mode, vid, project_id, orientation, len(parsed_scene_ids) if parsed_scene_ids else "all")
     try:
         result = await review_video(vid, project_id, mode=mode, orientation=orientation, scene_ids=parsed_scene_ids)
-    except Exception as e:
-        logger.exception("Review failed for video %s: %s", vid, e)
-        raise HTTPException(500, f"Review failed: {e}")
+    except Exception:
+        logger.exception("Video review failed video_id=%s", vid)
+        raise HTTPException(502, "Video review failed")
 
     return result
 
@@ -85,11 +85,11 @@ async def review_scene_endpoint(
     logger.info("Starting %s review for scene %s (%s)", mode, sid, orientation)
     try:
         result = await review_scene_video(scene, characters, mode=mode, orientation=orientation, project_id=project_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        logger.exception("Review failed for scene %s: %s", sid, e)
-        raise HTTPException(500, f"Review failed: {e}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        logger.exception("Scene review failed video_id=%s scene_id=%s", vid, sid)
+        raise HTTPException(502, "Scene review failed")
 
     return result
 

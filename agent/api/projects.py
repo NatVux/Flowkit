@@ -1,17 +1,22 @@
 import json
 import logging
+import os
 import re
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiohttp
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from agent.config import BASE_DIR
 from agent.models.project import Project, ProjectCreate, ProjectUpdate
 from agent.models.character import Character
 from agent.sdk.persistence.sqlite_repository import SQLiteRepository
 from agent.services.flow_client import get_flow_client
+from agent.services.media_process import validate_media_output
+from agent.api.validation import validate_id
 from agent.utils.slugify import slugify
 
 logger = logging.getLogger(__name__)
@@ -241,6 +246,7 @@ async def list_all(status: str = None):
 
 @router.get("/{pid}", response_model=Project)
 async def get(pid: str):
+    validate_id(pid, "project_id")
     repo = _get_repo()
     p = await repo.get_project(pid)
     if not p:
@@ -250,6 +256,7 @@ async def get(pid: str):
 
 @router.patch("/{pid}", response_model=Project)
 async def update(pid: str, body: ProjectUpdate):
+    validate_id(pid, "project_id")
     repo = _get_repo()
     row = await repo.update("project", pid, **body.model_dump(exclude_unset=True))
     if not row:
@@ -259,6 +266,7 @@ async def update(pid: str, body: ProjectUpdate):
 
 @router.delete("/{pid}")
 async def delete(pid: str):
+    validate_id(pid, "project_id")
     repo = _get_repo()
     if not await repo.delete_project(pid):
         raise HTTPException(404, "Project not found")
@@ -345,6 +353,14 @@ class ThumbnailRequest(BaseModel):
     aspect_ratio: str = "LANDSCAPE"
     output_filename: str = "thumbnail.png"
 
+    @field_validator("output_filename")
+    @classmethod
+    def validate_output_filename(cls, value: str) -> str:
+        name = Path(value).name
+        if name != value or name in {"", ".", ".."} or Path(name).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ValueError("output_filename must be a simple PNG, JPEG, or WebP filename")
+        return name
+
 
 class ThumbnailResponse(BaseModel):
     success: bool
@@ -363,6 +379,7 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
     from agent.materials import get_material
     from agent.sdk.services.result_handler import parse_result
 
+    validate_id(pid, "project_id")
     logger.info("generate_thumbnail: started for project %s", pid)
 
     client = get_flow_client()
@@ -421,19 +438,33 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
     project_name = slugify(getattr(project, "name", "project"))
     out_dir = BASE_DIR / "output" / project_name / "thumbnails"
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / body.output_filename
+    output_path = out_dir / Path(body.output_filename).name
 
     if gen_result.url and gen_result.url.startswith("http"):
+        temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
         try:
             connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 async with session.get(gen_result.url) as resp:
                     if resp.status == 200:
-                        output_path.write_bytes(await resp.read())
+                        data = await resp.read()
+                        if not data:
+                            raise HTTPException(502, "Thumbnail download returned an empty file")
+                        temporary_path.write_bytes(data)
+                        os.replace(temporary_path, output_path)
                     else:
                         raise HTTPException(502, f"Failed to download image: HTTP {resp.status}")
         except aiohttp.ClientError as e:
             raise HTTPException(502, f"Failed to download image: {e}") from e
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise HTTPException(502, "Thumbnail output was not created or is empty")
+    try:
+        validate_media_output(output_path, "thumbnail")
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        raise HTTPException(502, f"Thumbnail output is invalid: {exc}") from exc
 
     return ThumbnailResponse(
         success=True,

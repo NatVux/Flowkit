@@ -74,6 +74,7 @@ def base_scene():
         "video_prompt": "0-3s: Hero walks in. 3-6s: Looks around. 6-8s: Close-up.",
         "character_names": '["Hero", "Castle"]',
         "vertical_image_media_id": SAMPLE_UUID,
+        "vertical_image_status": "COMPLETED",
         "horizontal_image_media_id": None,
         "vertical_end_scene_media_id": None,
     }

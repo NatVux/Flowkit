@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from agent.models.character import Character, CharacterCreate, CharacterUpdate
 from agent.sdk.persistence.sqlite_repository import SQLiteRepository
 from agent.utils.slugify import slugify
+from agent.api.validation import validate_id
 
 router = APIRouter(prefix="/characters", tags=["characters"])
 
@@ -25,6 +26,7 @@ async def list_all():
 
 @router.get("/{cid}", response_model=Character)
 async def get(cid: str):
+    validate_id(cid, "character_id")
     repo = _get_repo()
     c = await repo.get_character(cid)
     if not c:
@@ -34,6 +36,7 @@ async def get(cid: str):
 
 @router.patch("/{cid}", response_model=Character)
 async def update(cid: str, body: CharacterUpdate):
+    validate_id(cid, "character_id")
     repo = _get_repo()
     updates = body.model_dump(exclude_unset=True)
     if "name" in updates:
@@ -46,7 +49,12 @@ async def update(cid: str, body: CharacterUpdate):
 
 @router.delete("/{cid}")
 async def delete(cid: str):
+    validate_id(cid, "character_id")
     repo = _get_repo()
-    if not await repo.delete_character(cid):
+    try:
+        deleted = await repo.delete_character(cid)
+    except Exception as exc:
+        raise HTTPException(409, "Character cannot be deleted while reference history exists") from exc
+    if not deleted:
         raise HTTPException(404, "Character not found")
     return {"ok": True}

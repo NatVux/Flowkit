@@ -77,6 +77,8 @@ async def test_apply_scene_result_generate_image_sets_fields_and_cascades(sample
     assert kwargs["vertical_video_media_id"] is None
     assert kwargs["vertical_upscale_status"] == "PENDING"
     assert kwargs["vertical_upscale_media_id"] is None
+    assert kwargs["narration_mix_status"] == "PENDING"
+    assert kwargs["narration_mix_path"] is None
 
 
 @pytest.mark.asyncio
@@ -111,6 +113,7 @@ async def test_apply_scene_result_generate_video_sets_fields_and_cascades_upscal
     # Cascade: upscale reset to PENDING
     assert kwargs["vertical_upscale_status"] == "PENDING"
     assert kwargs["vertical_upscale_media_id"] is None
+    assert kwargs["narration_mix_status"] == "PENDING"
     # No image keys touched
     assert "vertical_image_status" not in kwargs
 
@@ -177,6 +180,8 @@ async def test_apply_scene_result_horizontal_orientation_uses_correct_prefix(sam
 @pytest.mark.asyncio
 async def test_apply_character_result_sets_media_id_and_url(sample_uuid, mocker):
     mock_update = mocker.patch("agent.sdk.services.result_handler.crud.update_character", new_callable=AsyncMock)
+    mocker.patch("agent.sdk.services.result_handler.crud.list_scenes_for_character", new_callable=AsyncMock, return_value=[])
+    mocker.patch("agent.sdk.services.result_handler.crud.save_character_reference", new_callable=AsyncMock)
     result = GenerationResult(
         success=True,
         media_id=sample_uuid,
@@ -186,6 +191,29 @@ async def test_apply_character_result_sets_media_id_and_url(sample_uuid, mocker)
     await apply_character_result("char-001", result)
 
     mock_update.assert_awaited_once_with("char-001", media_id=sample_uuid, reference_image_url=result.url)
+
+
+@pytest.mark.asyncio
+async def test_character_regeneration_invalidates_dependent_scene_assets(sample_uuid, mocker):
+    mocker.patch("agent.sdk.services.result_handler.crud.update_character", new_callable=AsyncMock)
+    mocker.patch("agent.sdk.services.result_handler.crud.save_character_reference", new_callable=AsyncMock)
+    mock_scenes = mocker.patch(
+        "agent.sdk.services.result_handler.crud.list_scenes_for_character",
+        new_callable=AsyncMock,
+        return_value=[{"id": "scene-001"}],
+    )
+    mock_scene = mocker.patch("agent.sdk.services.result_handler.crud.update_scene", new_callable=AsyncMock)
+
+    await apply_character_result(
+        "char-001",
+        GenerationResult(success=True, media_id=sample_uuid, url="https://example.com/ref.jpg"),
+    )
+
+    mock_scenes.assert_awaited_once_with("char-001")
+    kwargs = mock_scene.call_args.kwargs
+    assert kwargs["vertical_image_status"] == "PENDING"
+    assert kwargs["horizontal_video_media_id"] is None
+    assert kwargs["narration_mix_status"] == "PENDING"
 
 
 @pytest.mark.asyncio

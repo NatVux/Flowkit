@@ -74,7 +74,8 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
     // The backend only ever emits 'request_update' (on PROCESSING/COMPLETED/FAILED transitions),
     // 'worker_tick', and 'urls_refreshed' — any of them means something in this pipeline may have changed.
     if (lastEvent.type === 'request_update' || lastEvent.type === 'urls_refreshed') {
-      load()
+      const refresh = window.setTimeout(() => { void load() }, 250)
+      return () => window.clearTimeout(refresh)
     }
   }, [lastEvent, load])
 

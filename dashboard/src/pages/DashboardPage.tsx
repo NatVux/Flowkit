@@ -68,7 +68,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!lastEvent) return
-    if (lastEvent.type === 'request_update' || lastEvent.type === 'urls_refreshed') Promise.resolve().then(load)
+    if (lastEvent.type !== 'request_update' && lastEvent.type !== 'urls_refreshed') return
+    const refresh = window.setTimeout(() => { void load() }, 250)
+    return () => window.clearTimeout(refresh)
   }, [lastEvent, load])
 
   if (loading) {

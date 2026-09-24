@@ -45,6 +45,10 @@ class Request(BaseModel):
     output_url: Optional[str] = None
     error_message: Optional[str] = None
     retry_count: int = 0
+    next_retry_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    last_failure_reason: Optional[str] = None
     source_media_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

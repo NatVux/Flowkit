@@ -1,15 +1,18 @@
 """Flow Kit — FastAPI + WebSocket server entry point."""
 import asyncio
+import hmac
 import json
 import logging
 import signal
 from contextlib import asynccontextmanager
 
 import websockets
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -28,8 +31,18 @@ from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
 from agent.sdk import init_sdk
+from agent.logging_utils import configure_logging, log_event
+from agent.services.backup import create_backup
+from agent.services.readiness import check_readiness
+from agent.api.errors import error_payload, ErrorResponse
+from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+class CallbackResponse(BaseModel):
+    ok: bool
+    reason: str | None = None
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +52,7 @@ async def ws_handler(websocket):
     """Handle a Chrome extension WebSocket connection."""
     client = get_flow_client()
     client.set_extension(websocket)
-    logger.info("Extension connected from %s", websocket.remote_address)
+    log_event(logger, logging.INFO, "extension_connected", remote_address=str(websocket.remote_address))
 
     # Send callback secret so extension can authenticate HTTP callbacks
     await websocket.send(json.dumps({"type": "callback_secret", "secret": _CALLBACK_SECRET}))
@@ -50,14 +63,14 @@ async def ws_handler(websocket):
                 data = json.loads(raw)
                 await client.handle_message(data, websocket)
             except json.JSONDecodeError:
-                logger.warning("Invalid JSON from extension")
+                log_event(logger, logging.WARNING, "extension_message_invalid_json")
             except Exception as e:
-                logger.exception("Error handling extension message: %s", e)
+                log_event(logger, logging.ERROR, "extension_message_failed", exc_info=True, error_type=type(e).__name__)
     except websockets.ConnectionClosed:
         pass
     finally:
         client.clear_extension(websocket)
-        logger.info("Extension disconnected")
+        log_event(logger, logging.INFO, "extension_disconnected")
 
 
 async def run_ws_server():
@@ -65,6 +78,18 @@ async def run_ws_server():
     async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
         logger.info("WebSocket server listening on ws://%s:%d", WS_HOST, WS_PORT)
         await asyncio.Future()  # run forever
+
+
+async def run_backup_scheduler(interval_seconds: int):
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            result = await create_backup()
+            log_event(logger, logging.INFO, "backup_completed", path=result["path"], files=result["files"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_event(logger, logging.ERROR, "backup_failed", exc_info=True, error_type=type(exc).__name__)
 
 
 # ─── FastAPI App ─────────────────────────────────────────────
@@ -86,6 +111,10 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to load custom materials: %s", e)
 
     ops = init_sdk(get_flow_client())
+    startup_checks = await check_readiness()
+    for name, check in startup_checks["checks"].items():
+        if not check.get("ok"):
+            logger.warning("Startup dependency unavailable: %s", name)
     logger.info("SDK initialized (OperationService ready)")
     logger.info("Flow Kit starting on %s:%d", API_HOST, API_PORT)
 
@@ -101,7 +130,11 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     ws_task = asyncio.create_task(run_ws_server())
     worker_task = asyncio.create_task(controller.start())
-    logger.info("WS server + worker started")
+    backup_task = (
+        asyncio.create_task(run_backup_scheduler(BACKUP_INTERVAL_SECONDS))
+        if BACKUP_INTERVAL_SECONDS > 0 else None
+    )
+    log_event(logger, logging.INFO, "worker_started")
 
     yield
 
@@ -109,11 +142,47 @@ async def lifespan(app: FastAPI):
     await controller.drain()
     ws_task.cancel()
     worker_task.cancel()
+    if backup_task:
+        backup_task.cancel()
     await close_db()
-    logger.info("Flow Kit stopped")
+    log_event(logger, logging.INFO, "worker_stopped")
 
 
 app = FastAPI(title="Flow Kit", version="1.3.1", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content=error_payload(
+        "VALIDATION_ERROR", "Request validation failed", exc.errors()
+    ))
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, exc: HTTPException):
+    detail = exc.detail
+    message = detail if isinstance(detail, str) else "Request failed"
+    return JSONResponse(status_code=exc.status_code, content=error_payload(
+        f"HTTP_{exc.status_code}", message, None if isinstance(detail, str) else detail
+    ), headers=exc.headers or {})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception):
+    logger.exception("Unhandled API error path=%s", request.url.path)
+    return JSONResponse(status_code=500, content=error_payload(
+        "INTERNAL_ERROR", "An internal server error occurred"
+    ))
+
+
+@app.middleware("http")
+async def request_size_limit(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 32 * 1024 * 1024:
+        return JSONResponse(status_code=413, content=error_payload(
+            "REQUEST_TOO_LARGE", "Request body exceeds the 32 MiB limit"
+        ))
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,
@@ -141,7 +210,7 @@ import secrets as _secrets
 _CALLBACK_SECRET = _secrets.token_urlsafe(32)
 
 
-@app.post("/api/ext/callback")
+@app.post("/api/ext/callback", response_model=CallbackResponse, responses={401: {"model": ErrorResponse}, 400: {"model": ErrorResponse}, 422: {"model": ErrorResponse}})
 async def ext_callback(request: Request):
     """HTTP callback for extension to deliver API responses.
 
@@ -149,19 +218,22 @@ async def ext_callback(request: Request):
     Extension POSTs {id, status, data, error} here instead of sending via WS.
     Requires X-Callback-Secret header matching the secret sent to extension on WS connect.
     """
-    data = await request.json()
+    supplied_secret = request.headers.get("X-Callback-Secret", "")
+    if not hmac.compare_digest(supplied_secret, _CALLBACK_SECRET):
+        raise HTTPException(401, "Invalid callback secret")
+    try:
+        data = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid JSON callback payload") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+        raise HTTPException(422, "Callback payload requires a request id")
     client = get_flow_client()
     req_id = data.get("id")
     logger.info("ext/callback: id=%s pending=%d match=%s",
                 str(req_id)[:8] if req_id else "none",
-                len(client._pending),
-                "yes" if req_id and req_id in client._pending else "no")
-    if req_id and req_id in client._pending:
-        future = client._pending[req_id]
-        try:
-            future.set_result(data)
-        except asyncio.InvalidStateError:
-            pass
+                client.pending_count,
+                "yes" if req_id and client.has_pending(req_id) else "no")
+    if req_id and client.deliver_response(data):
         return {"ok": True}
     return {"ok": False, "reason": "no matching pending request"}
 
@@ -175,6 +247,14 @@ async def health():
         "extension_connected": client.connected,
         "ws": client.ws_stats,
     }
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness for generation workloads, including the interactive bridge."""
+    result = await check_readiness()
+    status_code = 200 if result["ready"] else 503
+    return JSONResponse(status_code=status_code, content=result)
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────

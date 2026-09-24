@@ -7,16 +7,24 @@ import asyncio
 import base64
 import json
 import logging
+import random
 import time
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
 from agent.db import crud
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
-from agent.config import POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS
+from agent.config import (
+    POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS,
+    STALE_PROCESSING_TIMEOUT, WORKER_OPERATION_TIMEOUT, RETRY_JITTER_SECONDS,
+)
 from agent.worker._parsing import _is_error
-from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
+from agent.sdk.services.result_handler import (
+    parse_result, apply_scene_result, apply_character_result, invalidate_scene_dependents,
+)
+from agent.logging_utils import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +51,15 @@ class APIRateLimiter:
 
     async def acquire(self):
         await self._semaphore.acquire()
-        async with self._gate:
-            elapsed = time.monotonic() - self._last_call
-            if elapsed < self._cooldown:
-                await asyncio.sleep(self._cooldown - elapsed)
-            self._last_call = time.monotonic()
+        try:
+            async with self._gate:
+                elapsed = time.monotonic() - self._last_call
+                if elapsed < self._cooldown:
+                    await asyncio.sleep(self._cooldown - elapsed)
+                self._last_call = time.monotonic()
+        except BaseException:
+            self._semaphore.release()
+            raise
 
     def release(self):
         self._semaphore.release()
@@ -59,6 +71,7 @@ class WorkerController:
     def __init__(self):
         self._shutdown = asyncio.Event()
         self._active_ids: set[str] = set()
+        self._tasks: set[asyncio.Task] = set()
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
@@ -74,27 +87,29 @@ class WorkerController:
         await self._run_loop()
 
     def request_shutdown(self):
-        """Signal the worker to stop after current tasks drain."""
+        """Signal the worker to stop and let active tasks be cancelled by drain."""
         self._shutdown.set()
 
     async def drain(self, timeout: float = 30.0):
-        """Wait until all active tasks complete, with timeout."""
-        deadline = time.monotonic() + timeout
-        while self._active_ids and time.monotonic() < deadline:
-            await asyncio.sleep(0.5)
-        if self._active_ids:
-            logger.warning("Drain timeout: %d tasks still active after %.0fs", len(self._active_ids), timeout)
+        """Wait for active tasks, then cancel anything that exceeds the deadline."""
+        tasks = tuple(self._tasks)
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning("worker_shutdown_timeout active=%d timeout=%.1f", len(pending), timeout)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _cleanup_stale_processing(self):
         """Reset any requests stuck in PROCESSING state from a previous run."""
         try:
-            stale = await crud.list_requests(status="PROCESSING")
-            for req in stale:
-                await crud.update_request(req["id"], status="PENDING",
-                                          error_message="reset: stale PROCESSING on startup")
-                logger.warning("Stale request reset: %s type=%s", req["id"][:8], req.get("type"))
-            if stale:
-                logger.info("Cleaned up %d stale PROCESSING requests", len(stale))
+            stale_count = await crud.reset_stale_processing(
+                cutoff_minutes=max(1, (STALE_PROCESSING_TIMEOUT + 59) // 60)
+            )
+            if stale_count:
+                logger.info("Cleaned up %d stale PROCESSING requests", stale_count)
         except Exception as e:
             logger.warning("Could not clean up stale requests: %s", e)
 
@@ -104,17 +119,20 @@ class WorkerController:
         while not self._shutdown.is_set():
             try:
                 if not client.connected:
-                    await asyncio.sleep(POLL_INTERVAL)
+                    await self._sleep_or_shutdown(POLL_INTERVAL)
                     continue
 
                 now = time.time()
                 slots_available = MAX_CONCURRENT_REQUESTS - len(self._active_ids)
                 if slots_available <= 0:
-                    await asyncio.sleep(POLL_INTERVAL)
+                    await self._sleep_or_shutdown(POLL_INTERVAL)
                     continue
 
-                pending = await crud.list_actionable_requests(
-                    exclude_ids=self._active_ids, limit=slots_available
+                excluded_ids = set(self._active_ids)
+                excluded_ids.update(rid for rid, deadline in self._deferred.items() if deadline > now)
+                excluded_ids.update(rid for rid, deadline in self._retry_after.items() if deadline > now)
+                pending = await crud.claim_actionable_requests(
+                    exclude_ids=excluded_ids, limit=slots_available
                 )
 
                 pending_count = len(pending)
@@ -125,7 +143,7 @@ class WorkerController:
                 })
 
                 if pending:
-                    logger.info("Worker: %d actionable, %d active, %d slots",
+                    logger.debug("Worker: %d actionable, %d active, %d slots",
                                 len(pending), len(self._active_ids), slots_available)
 
                 for req in pending:
@@ -137,18 +155,13 @@ class WorkerController:
                     if rid in self._active_ids:
                         continue
 
-                    # Skip recently deferred (prereq or retry cooldown)
-                    if rid in self._deferred and self._deferred[rid] > now:
-                        continue
                     self._deferred.pop(rid, None)
-
-                    # Skip if retry backoff not elapsed
-                    if rid in self._retry_after and self._retry_after[rid] > now:
-                        continue
 
                     self._active_ids.add(rid)
                     slots_available -= 1
-                    asyncio.create_task(self._run_one(req))
+                    task = asyncio.create_task(self._run_one(req), name=f"flowkit-request-{rid}")
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
 
                 # Prune stale deferred/retry entries for requests no longer pending
                 pending_ids = {r["id"] for r in pending}
@@ -158,18 +171,46 @@ class WorkerController:
             except Exception as e:
                 logger.exception("Worker loop error: %s", e)
 
-            await asyncio.sleep(POLL_INTERVAL)
+            await self._sleep_or_shutdown(POLL_INTERVAL)
+
+    async def _sleep_or_shutdown(self, seconds: float):
+        try:
+            await asyncio.wait_for(self._shutdown.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
 
     async def _run_one(self, req: dict):
         rid = req["id"]
+        started = time.monotonic()
+        final_status = "UNKNOWN"
         try:
             await self._rate_limiter.acquire()
             try:
                 await _process_one(req, self._deferred, self._retry_after)
             finally:
                 self._rate_limiter.release()
+        except asyncio.CancelledError:
+            final_status = "CANCELLED"
+            log_event(logger, logging.WARNING, "job_cancelled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"))
+            try:
+                await _set_request_status(req, "PENDING", error_message="worker task cancelled", last_failure_reason="worker task cancelled")
+            except Exception:
+                logger.exception("worker_cancel_recovery request_id=%s", rid)
+            raise
+        except Exception:
+            log_event(logger, logging.ERROR, "job_failed", exc_info=True, request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), error_type="worker_task_error")
         finally:
             self._active_ids.discard(rid)
+            try:
+                latest = await asyncio.shield(crud.get_request(rid))
+                final_status = (latest or {}).get("status", final_status)
+            except Exception:
+                pass
+            log_event(logger, logging.INFO, "job_completed" if final_status == "COMPLETED" else "job_finished",
+                      request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"),
+                      scene_id=req.get("scene_id"), operation=req.get("type"),
+                      attempt=req.get("retry_count", 0) + 1,
+                      duration_ms=round((time.monotonic() - started) * 1000), final_status=final_status)
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
@@ -229,9 +270,26 @@ async def _resolve_orientation(req: dict) -> str:
     return "VERTICAL"
 
 
+async def _set_request_status(req: dict, status: str, **updates):
+    return await crud.update_request(
+        req["id"],
+        status=status,
+        _expected_started_at=req.get("started_at"),
+        **updates,
+    )
+
+
 async def _process_one(req: dict, deferred: dict = None, retry_after: dict = None):
     rid, req_type = req["id"], req["type"]
     orientation = await _resolve_orientation(req)
+    log_context = {
+        "request_id": rid,
+        "project_id": req.get("project_id"),
+        "video_id": req.get("video_id"),
+        "scene_id": req.get("scene_id"),
+        "operation": req_type,
+        "attempt": req.get("retry_count", 0) + 1,
+    }
 
     if await _is_already_completed(req, orientation):
         logger.info("Request %s skipped — already COMPLETED", rid[:8])
@@ -255,26 +313,33 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
                 elif req_type == "UPSCALE_VIDEO":
                     skip_kwargs["media_id"] = scene.get(f"{prefix}_upscale_media_id")
                     skip_kwargs["output_url"] = scene.get(f"{prefix}_upscale_url")
-        await crud.update_request(rid, **skip_kwargs)
+        await _set_request_status(req, "COMPLETED", **{k: v for k, v in skip_kwargs.items() if k != "status"})
         return
 
     # Check prerequisites before dispatching — don't burn retries on missing deps
     if not await _prerequisites_met(req, orientation):
         if deferred is not None:
             deferred[rid] = time.time() + 30  # defer 30s before rechecking
+        await _set_request_status(req, "PENDING")
         return
 
-    logger.info("Processing request %s type=%s", rid[:8], req_type)
-    await crud.update_request(rid, status="PROCESSING")
+    log_event(logger, logging.INFO, "job_started", **log_context)
     await event_bus.emit("request_update", {"id": rid, "status": "PROCESSING", "type": req_type})
 
     try:
-        result = await _dispatch(req, orientation)
+        if req_type == "REGENERATE_IMAGE":
+            await invalidate_scene_dependents(req["scene_id"], orientation, "image")
+        elif req_type == "REGENERATE_VIDEO":
+            await invalidate_scene_dependents(req["scene_id"], orientation, "video")
+        operation_started = time.monotonic()
+        result = await asyncio.wait_for(
+            _dispatch(req, orientation), timeout=WORKER_OPERATION_TIMEOUT
+        )
         if _is_error(result):
             await _handle_failure(rid, req, result, retry_after)
         else:
             gen_result = parse_result(result, req_type)
-            await crud.update_request(rid, status="COMPLETED", media_id=gen_result.media_id, output_url=gen_result.url)
+            await _set_request_status(req, "COMPLETED", media_id=gen_result.media_id, output_url=gen_result.url)
             if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
                 char_id = req.get("character_id")
                 if char_id:
@@ -282,9 +347,14 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
             else:
                 await apply_scene_result(req.get("scene_id"), req_type, orientation, gen_result)
             await event_bus.emit("request_update", {"id": rid, "status": "COMPLETED"})
-            logger.info("Request %s COMPLETED: media=%s", rid[:8], gen_result.media_id[:20] if gen_result.media_id else "?")
+            log_event(logger, logging.INFO, "job_completed", **log_context,
+                      duration_ms=round((time.monotonic() - operation_started) * 1000), final_status="COMPLETED")
     except Exception as e:
-        logger.exception("Request %s exception: %s", rid[:8], e)
+        if isinstance(e, asyncio.TimeoutError):
+            log_event(logger, logging.WARNING, "job_timeout", **log_context, timeout_seconds=WORKER_OPERATION_TIMEOUT)
+        log_event(logger, logging.ERROR, "job_failed", exc_info=True, **log_context,
+                  duration_ms=round((time.monotonic() - operation_started) * 1000) if "operation_started" in locals() else 0,
+                  final_status="FAILED", error_type=type(e).__name__)
         await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": str(e)})
         await _handle_failure(rid, req, {"error": str(e)}, retry_after)
 
@@ -411,6 +481,20 @@ async def _recover_entity_not_found(req: dict) -> bool:
     return False
 
 
+def _retry_at(delay_seconds: int) -> str:
+    jitter = random.uniform(0, RETRY_JITTER_SECONDS)
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds + jitter)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _is_retryable_error(error: str) -> bool:
+    permanent_markers = (
+        "unsupported_on_batch_api", "no_flow_project", "invalid request",
+        "permission denied", "unauthorized", "forbidden", "not configured",
+        "unknown request type", "scene not found", "character not found",
+    )
+    return not any(marker in error.lower() for marker in permanent_markers)
+
+
 async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict = None):
     error_msg = result.get("error")
     if not error_msg:
@@ -438,35 +522,41 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     if "not found" in str(error_msg).lower():
         recovered = await _recover_entity_not_found(req)
         if recovered:
-            logger.info("Request %s: recovered expired media, retrying", rid[:8])
-            await crud.update_request(rid, status="PENDING", error_message=f"recovered: {error_msg}")
+            log_event(logger, logging.WARNING, "retry_scheduled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), reason="expired_media_recovered")
+            await _set_request_status(req, "PENDING", error_message=f"recovered: {error_msg}", last_failure_reason=str(error_msg))
             return
 
     error_lower = str(error_msg).lower()
 
+    if not _is_retryable_error(str(error_msg)):
+        await _set_request_status(req, "FAILED", error_message=str(error_msg), last_failure_reason=str(error_msg))
+        await _mark_scene_failed(req)
+        log_event(logger, logging.ERROR, "job_failed", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), final_status="FAILED", reason="permanent_error")
+        return
+
     # A capability the batch path does not have, or a missing Flow project, is
     # a configuration answer — not something a retry can reach. Fail it once.
     if "unsupported_on_batch_api" in error_lower or "no_flow_project" in error_lower:
-        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        await _set_request_status(req, "FAILED", error_message=str(error_msg), last_failure_reason=str(error_msg))
         await _mark_scene_failed(req)
         logger.error("Request %s FAILED (not retryable): %s", rid[:8], error_msg)
         return
 
     # WS transient errors (extension disconnect/reconnect): retry without incrementing count
     if "extension reconnected" in error_lower or "extension disconnected" in error_lower or "extension not connected" in error_lower:
-        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
-        logger.info("Request %s transient WS error, will retry (no retry increment): %s", rid[:8], error_msg)
+        await _set_request_status(req, "PENDING", error_message=str(error_msg), last_failure_reason=str(error_msg), next_retry_at=_retry_at(5))
+        log_event(logger, logging.WARNING, "retry_scheduled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), reason="transient_connection")
         return
 
     # reCAPTCHA errors: retry up to 10 times — deferred dict in main loop handles delay
     if "captcha" in error_lower or "recaptcha" in error_lower:
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
-            await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
-            logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry", rid[:8], retry)
+            await _set_request_status(req, "PENDING", retry_count=retry, error_message=str(error_msg), last_failure_reason=str(error_msg), next_retry_at=_retry_at(min(2 ** retry * 10, 300)))
+            log_event(logger, logging.WARNING, "retry_scheduled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), attempt=retry, reason="captcha")
             return
         else:
-            await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+            await _set_request_status(req, "FAILED", error_message=str(error_msg), last_failure_reason=str(error_msg))
             await _mark_scene_failed(req)
             logger.error("Request %s FAILED after 10 reCAPTCHA retries: %s", rid[:8], error_msg)
             return
@@ -478,13 +568,13 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
             ra = retry_after.get(rid, 0.0)
             if ra > now:
                 # Still in backoff — reset to PENDING so it's not stuck in PROCESSING
-                await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+                await _set_request_status(req, "PENDING", error_message=str(error_msg), last_failure_reason=str(error_msg), next_retry_at=_retry_at(max(1, int(ra - now))))
                 return
             retry_after[rid] = now + min(2 ** retry * 10, 300)
-        await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
-        logger.warning("Request %s failed (retry %d/%d): %s", rid[:8], retry, MAX_RETRIES, error_msg)
+        await _set_request_status(req, "PENDING", retry_count=retry, error_message=str(error_msg), last_failure_reason=str(error_msg), next_retry_at=_retry_at(min(2 ** retry * 10, 300)))
+        log_event(logger, logging.WARNING, "retry_scheduled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), attempt=retry, reason="retryable_error")
     else:
-        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        await _set_request_status(req, "FAILED", error_message=str(error_msg), last_failure_reason=str(error_msg))
         await _mark_scene_failed(req)
         logger.error("Request %s FAILED permanently: %s", rid[:8], error_msg)
 

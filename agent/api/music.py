@@ -1,6 +1,9 @@
 """Music generation routes — Suno API integration (sunoapi.org)."""
 import json
 import logging
+import os
+import re
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -70,6 +73,8 @@ class ConvertToWavRequest(BaseModel):
 
 
 def _load_template(template_id: str) -> dict:
+    if Path(template_id).name != template_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", template_id):
+        raise HTTPException(422, "Invalid template id")
     path = TEMPLATES_DIR / f"{template_id}.json"
     if not path.exists():
         raise HTTPException(404, f"Template '{template_id}' not found")
@@ -80,12 +85,14 @@ async def _handle_suno_call(coro):
     """Run a suno client coroutine with standard error handling."""
     try:
         return await coro
-    except TimeoutError as e:
-        raise HTTPException(504, str(e))
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+    except TimeoutError:
+        raise HTTPException(504, "Music provider timed out")
+    except RuntimeError:
+        logger.exception("Music provider runtime failure")
+        raise HTTPException(503, "Music provider request failed")
     except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, f"Suno API error: {e.response.text[:500]}")
+        logger.warning("Music provider returned HTTP %s", e.response.status_code)
+        raise HTTPException(503, "Music provider request failed")
 
 
 # ─── Templates ───────────────────────────────────────────────
@@ -201,15 +208,22 @@ async def download_task_clips(task_id: str, project_id: Optional[str] = None):
         audio_url = clip.get("audioUrl") or clip.get("audio_url")
         if not audio_url:
             continue
-        clip_id = clip.get("id", "unknown")
-        title = clip.get("title", "untitled").replace("/", "_").replace(" ", "_")[:50]
-        filename = f"{title}_{clip_id[:8]}.mp3"
+        clip_id = str(clip.get("id", "unknown"))
+        title = re.sub(r"[^A-Za-z0-9._-]+", "_", str(clip.get("title", "untitled"))).strip("._")[:50] or "untitled"
+        filename = f"{title}_{re.sub(r'[^A-Za-z0-9-]', '', clip_id[:8]) or 'clip'}.mp3"
         out_path = out_dir / filename
+        temporary_path = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex}.tmp")
 
-        async with httpx.AsyncClient(timeout=60) as http:
-            r = await http.get(audio_url)
-            r.raise_for_status()
-            out_path.write_bytes(r.content)
+        try:
+            async with httpx.AsyncClient(timeout=60) as http:
+                r = await http.get(audio_url)
+                r.raise_for_status()
+                if not r.content:
+                    raise HTTPException(502, f"Music clip {clip_id[:8]} returned an empty file")
+                temporary_path.write_bytes(r.content)
+                os.replace(temporary_path, out_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
         logger.info("Downloaded clip %s → %s (%.1f MB)", clip_id[:8], out_path, len(r.content) / 1e6)
         downloaded.append({
@@ -239,7 +253,9 @@ async def generate_lyrics(body: GenerateLyricsRequest):
         if tips:
             prompt += f"\n\nStyle guidelines: {'; '.join(tips)}"
 
-    task_id = await _handle_suno_call(client.generate_lyrics(prompt))
+        task_id = await _handle_suno_call(client.generate_lyrics(prompt)) 
+        logger.warning("Suno API returned HTTP %s", e.response.status_code)
+        raise HTTPException(e.response.status_code, "Music provider request failed")
 
     if not body.poll:
         return {"task_id": task_id}

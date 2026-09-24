@@ -1,10 +1,12 @@
 """Direct Flow API endpoints — for manual operations outside the queue."""
 from fastapi import APIRouter, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pathlib import Path
 from typing import Literal, Optional
 
-from agent.config import FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
+from agent.config import FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED, BASE_DIR, OUTPUT_DIR
 from agent.services.flow_client import get_flow_client
+from agent.api.validation import validate_id
 from agent.services.omni_flash import (
     check_omni_flash_status,
     generate_omni_flash_first_frame_video,
@@ -88,6 +90,14 @@ class UploadImageRequest(BaseModel):
     project_id: str = ""
     file_name: str = "image.png"
 
+    @field_validator("file_name")
+    @classmethod
+    def validate_file_name(cls, value: str) -> str:
+        name = Path(value).name
+        if name != value or Path(name).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ValueError("file_name must be a simple image filename")
+        return name
+
 
 class CheckStatusRequest(BaseModel):
     operations: list[dict] = []
@@ -131,8 +141,13 @@ async def extension_status():
     authenticates in the page and there is no bearer token to capture.
     """
     client = get_flow_client()
+    ws_stats = client.ws_stats
     return {
         "connected": client.connected,
+        "extension_status": ws_stats.get("extension_statuses", []),
+        "flow_tab_available": ws_stats.get("flow_tab_available", False),
+        "busy": ws_stats.get("busy", False),
+        "active_connections": ws_stats.get("active_connections", 0),
         # One transport now. The key stays so the documented pre-flight check
         # (CLAUDE.md) keeps reading {"transport": "batch", ...}.
         "transport": "batch",
@@ -361,6 +376,7 @@ async def check_omni_status(body: CheckOmniStatusRequest):
 
 @router.post("/refresh-urls/{project_id}")
 async def refresh_project_urls(project_id: str):
+    validate_id(project_id, "project_id")
     """Bulk refresh all media URLs for a project via per-media get_media calls."""
     client = get_flow_client()
     if not client.connected:
@@ -452,13 +468,19 @@ async def upload_image(body: UploadImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    source = Path(body.file_path).expanduser().resolve()
+    allowed_roots = [Path(BASE_DIR).resolve(), Path(OUTPUT_DIR).resolve()]
+    if not any(source.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(400, "file_path must be inside the Flow Kit workspace or output directory")
     try:
-        with open(body.file_path, "rb") as f:
+        with open(source, "rb") as f:
             image_bytes = f.read()
     except FileNotFoundError:
-        raise HTTPException(404, f"File not found: {body.file_path}")
+        raise HTTPException(404, "Image file not found")
+    if not image_bytes or len(image_bytes) > 16 * 1024 * 1024:
+        raise HTTPException(413, "Image file must be non-empty and no larger than 16 MiB")
     b64 = base64.b64encode(image_bytes).decode()
-    mime = mimetypes.guess_type(body.file_path)[0] or "image/png"
+    mime = mimetypes.guess_type(str(source))[0] or "image/png"
     result = await client.upload_image(b64, mime_type=mime, project_id=body.project_id, file_name=body.file_name)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))

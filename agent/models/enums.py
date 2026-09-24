@@ -1,5 +1,6 @@
 from typing import Literal
 
+
 RequestType = Literal[
     "GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE",
     "GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO",

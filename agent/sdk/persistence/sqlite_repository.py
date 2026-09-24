@@ -72,6 +72,14 @@ class SQLiteRepository(Repository):
             duration=row.get("duration"),
             resolution=row.get("resolution"),
             youtube_id=row.get("youtube_id"),
+            upload_url=row.get("upload_url"),
+            youtube_upload_status=row.get("youtube_upload_status", "NOT_STARTED"),
+            youtube_upload_error=row.get("youtube_upload_error"),
+            youtube_upload_attempts=row.get("youtube_upload_attempts", 0),
+            youtube_uploaded_at=row.get("youtube_uploaded_at"),
+            youtube_publish_status=row.get("youtube_publish_status", "NOT_PUBLISHED"),
+            youtube_publish_error=row.get("youtube_publish_error"),
+            youtube_published_at=row.get("youtube_published_at"),
             privacy=row.get("privacy", "unlisted"),
             tags=row.get("tags"),
             created_at=row.get("created_at"),
@@ -99,6 +107,11 @@ class SQLiteRepository(Repository):
             "trim_end": scene.trim_end,
             "duration": scene.duration,
             "narrator_text": scene.narrator_text,
+            "narration_audio_path": scene.narration_audio_path,
+            "narration_audio_duration": scene.narration_audio_duration,
+            "narration_audio_status": scene.narration_audio_status,
+            "narration_mix_path": scene.narration_mix_path,
+            "narration_mix_status": scene.narration_mix_status,
             # Vertical
             "vertical_image_url": scene.vertical.image.url,
             "vertical_image_media_id": scene.vertical.image.media_id,
@@ -122,7 +135,10 @@ class SQLiteRepository(Repository):
             "horizontal_upscale_status": scene.horizontal.upscale.status,
             "horizontal_end_scene_media_id": scene.horizontal.end_scene_media_id,
         }
-        return {k: v for k, v in updates.items() if v is not None or k.endswith("_media_id") or k.endswith("_url") or k.endswith("_status")}
+        return {
+            k: v for k, v in updates.items()
+            if v is not None or k.endswith(("_media_id", "_url", "_status", "_path", "_duration"))
+        }
 
     # ------------------------------------------------------------------
     # Generic low-level interface

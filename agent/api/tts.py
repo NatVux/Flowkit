@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from agent.config import TTS_TEMPLATES_DIR, SHARED_OUTPUT_DIR, OUTPUT_DIR
 from agent.utils.slugify import slugify
+from agent.db import crud
 from agent.db.crud import get_video, list_scenes, get_project
 from agent.models.tts import (
     TTSGenerateRequest,
@@ -22,6 +23,7 @@ from agent.models.tts import (
 )
 from agent.services.tts import generate_speech, generate_video_narration
 from agent.services.post_process import add_narration
+from agent.services.media_process import probe_duration
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,9 @@ async def narrate_video(vid: str, body: NarrateVideoRequest):
     if len(scenes_with_text) > MAX_NARRATE_SCENES:
         raise HTTPException(400, f"Too many scenes with narrator_text: max {MAX_NARRATE_SCENES}, got {len(scenes_with_text)}")
 
+    for scene in scenes_with_text:
+        await crud.update_scene(scene["id"], narration_audio_status="PROCESSING", narration_mix_status="PENDING")
+
     # Resolve voice template by name if provided
     instruct = body.instruct or project.get("narrator_voice")
     ref_audio = body.ref_audio or project.get("narrator_ref_audio")
@@ -167,23 +172,39 @@ async def narrate_video(vid: str, body: NarrateVideoRequest):
 
     scene_results = []
     for r in raw_results:
+        audio_path = r.get("audio_path")
+        audio_ok = r["status"] == "COMPLETED" and bool(audio_path) and Path(audio_path).is_file()
+        audio_status = "COMPLETED" if audio_ok else "FAILED" if r["status"] == "FAILED" or r.get("audio_path") else "PENDING"
+        if audio_status == "FAILED":
+            r["status"] = "FAILED"
+            r["error"] = r.get("error") or "Narration output file is missing"
+        await crud.update_scene(
+            r["scene_id"],
+            narration_audio_path=audio_path if audio_ok else None,
+            narration_audio_duration=r.get("duration") if audio_ok else None,
+            narration_audio_status=audio_status,
+            narration_mix_path=None,
+            narration_mix_status="PENDING",
+        )
         result = SceneNarrationResult(
             scene_id=r["scene_id"],
             display_order=r["display_order"],
             narrator_text=r.get("narrator_text"),
-            audio_path=r.get("audio_path"),
+            audio_path=audio_path if audio_ok else None,
             duration=r.get("duration"),
             status=r["status"],
             error=r.get("error"),
         )
 
         # Mix narration into video if requested and both files exist
-        if body.mix and r["status"] == "COMPLETED" and r.get("audio_path"):
+        if body.mix and audio_ok:
             scene_data = next((s for s in scenes if s["id"] == r["scene_id"]), None)
             if scene_data:
                 video_url_key = f"{orientation.lower()}_video_url"
                 video_path = scene_data.get(video_url_key)
-                if video_path and Path(video_path).exists():
+                video_status = scene_data.get(f"{orientation.lower()}_video_status")
+                if video_status == "COMPLETED" and video_path and Path(video_path).is_file():
+                    await crud.update_scene(scene_data["id"], narration_mix_status="PROCESSING")
                     mixed_path = str(narrated_dir / f"scene_{r['display_order']:03d}_{r['scene_id']}_mixed.mp4")
                     ok = add_narration(
                         video_path=video_path,
@@ -192,9 +213,14 @@ async def narrate_video(vid: str, body: NarrateVideoRequest):
                         sfx_volume=body.sfx_volume,
                     )
                     if ok:
+                        await crud.update_scene(scene_data["id"], narration_mix_path=mixed_path, narration_mix_status="COMPLETED")
                         logger.info("Mixed narration for scene %s -> %s", r["scene_id"], mixed_path)
                     else:
+                        await crud.update_scene(scene_data["id"], narration_mix_path=None, narration_mix_status="FAILED")
                         logger.warning("Narration mix failed for scene %s", r["scene_id"])
+                elif body.mix:
+                    await crud.update_scene(scene_data["id"], narration_mix_path=None, narration_mix_status="FAILED")
+                    logger.warning("Narration mix skipped for scene %s: completed local video is missing", r["scene_id"])
 
         scene_results.append(result)
 
@@ -307,11 +333,6 @@ def _save_templates_meta(meta: dict):
 
 def _wav_duration(path: str) -> float | None:
     try:
-        import subprocess
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=30,
-        )
-        return float(result.stdout.strip())
-    except Exception:
+        return probe_duration(path)
+    except (FileNotFoundError, ValueError, RuntimeError):
         return None

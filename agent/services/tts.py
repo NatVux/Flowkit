@@ -3,11 +3,11 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 from pathlib import Path
 from typing import Optional
 
 from agent.config import TTS_MODEL, TTS_SAMPLE_RATE
+from agent.services.media_process import run_media_command, validate_output_file
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ async def generate_speech(
     result = await loop.run_in_executor(None, _run_tts_subprocess, args)
 
     if not result.get("ok"):
+        Path(output_path).unlink(missing_ok=True)
         raise RuntimeError(f"TTS failed: {result.get('error', 'unknown')}")
 
     logger.info("TTS saved to %s", output_path)
@@ -110,16 +111,17 @@ async def generate_speech(
 
 def _run_tts_subprocess(args: dict) -> dict:
     """Run TTS subprocess."""
-    proc = subprocess.run(
-        [PYTHON_BIN, "-c", _TTS_SCRIPT, json.dumps(args)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if proc.returncode != 0:
-        return {"ok": False, "error": proc.stderr[-500:] if proc.stderr else "unknown error"}
+    proc = run_media_command([PYTHON_BIN, "-c", _TTS_SCRIPT, json.dumps(args)], timeout=120)
+    if not proc.ok:
+        return {"ok": False, "error": proc.error or "unknown TTS error"}
     try:
-        return json.loads(proc.stdout.strip().split("\n")[-1])
+        result = json.loads(proc.stdout.strip().split("\n")[-1])
+        validate_output_file(result.get("path") or args["output"], "TTS output")
+        return result
     except (json.JSONDecodeError, IndexError):
         return {"ok": False, "error": proc.stdout[-200:] + proc.stderr[-200:]}
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 async def generate_video_narration(
@@ -239,15 +241,21 @@ async def generate_video_narration(
 def _run_batch_subprocess(args: dict) -> list[dict]:
     """Run batch TTS subprocess. Model loads once."""
     timeout = 180 + len(args.get("items", [])) * 45  # ~180s model load + ~45s per scene
-    proc = subprocess.run(
-        [PYTHON_BIN, "-c", _TTS_BATCH_SCRIPT, json.dumps(args)],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    if proc.returncode != 0:
-        error = proc.stderr[-500:] if proc.stderr else "unknown"
+    proc = run_media_command([PYTHON_BIN, "-c", _TTS_BATCH_SCRIPT, json.dumps(args)], timeout=timeout)
+    if not proc.ok:
+        error = proc.error or "unknown"
         return [{"id": item["id"], "ok": False, "error": error} for item in args["items"]]
     try:
-        return json.loads(proc.stdout.strip().split("\n")[-1])
+        results = json.loads(proc.stdout.strip().split("\n")[-1])
+        for result in results:
+            if result.get("ok"):
+                try:
+                    validate_output_file(result.get("path"), "TTS output")
+                except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                    result.update(ok=False, error=str(exc))
+            if not result.get("ok") and result.get("path"):
+                Path(result["path"]).unlink(missing_ok=True)
+        return results
     except (json.JSONDecodeError, IndexError):
         error = proc.stdout[-200:] + proc.stderr[-200:]
         return [{"id": item["id"], "ok": False, "error": error} for item in args["items"]]

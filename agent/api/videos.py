@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
-from agent.models.video import Video, VideoCreate, VideoUpdate
+from agent.models.video import Video, VideoCreate, VideoUpdate, YouTubeUploadRequest, YouTubeActionResponse
 from agent.sdk.persistence.sqlite_repository import SQLiteRepository
 from dataclasses import asdict
+from agent.services.youtube_publisher import YouTubePublisher, YouTubeClient, YouTubeAuthError, YouTubeUploadError
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 
@@ -24,6 +25,14 @@ def _video_to_flat(sdk_video) -> dict:
         "duration": sdk_video.duration,
         "resolution": sdk_video.resolution,
         "youtube_id": sdk_video.youtube_id,
+        "upload_url": sdk_video.upload_url,
+        "youtube_upload_status": sdk_video.youtube_upload_status,
+        "youtube_upload_error": sdk_video.youtube_upload_error,
+        "youtube_upload_attempts": sdk_video.youtube_upload_attempts,
+        "youtube_uploaded_at": sdk_video.youtube_uploaded_at,
+        "youtube_publish_status": sdk_video.youtube_publish_status,
+        "youtube_publish_error": sdk_video.youtube_publish_error,
+        "youtube_published_at": sdk_video.youtube_published_at,
         "privacy": sdk_video.privacy,
         "tags": sdk_video.tags,
         "created_at": sdk_video.created_at,
@@ -65,3 +74,41 @@ async def delete(vid: str):
     if not await _repo.delete("video", vid):
         raise HTTPException(404, "Video not found")
     return {"ok": True}
+
+
+_youtube_client: YouTubeClient | None = None
+
+
+def set_youtube_client(client: YouTubeClient | None) -> None:
+    global _youtube_client
+    _youtube_client = client
+
+
+def _youtube_publisher() -> YouTubePublisher:
+    if _youtube_client is None:
+        raise HTTPException(503, "YouTube publishing is not configured")
+    return YouTubePublisher(_youtube_client)
+
+
+@router.post("/{vid}/youtube/upload", response_model=YouTubeActionResponse)
+async def youtube_upload(vid: str, body: YouTubeUploadRequest):
+    try:
+        return await _youtube_publisher().upload(vid, **body.model_dump())
+    except YouTubeAuthError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except YouTubeUploadError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{vid}/youtube/publish", response_model=YouTubeActionResponse)
+async def youtube_publish(vid: str):
+    try:
+        return await _youtube_publisher().publish(vid)
+    except YouTubeAuthError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except YouTubeUploadError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc

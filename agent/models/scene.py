@@ -55,6 +55,11 @@ class SceneUpdate(BaseModel):
     trim_end: Optional[float] = None
     duration: Optional[float] = None
     narrator_text: Optional[str] = None
+    narration_audio_path: Optional[str] = None
+    narration_audio_duration: Optional[float] = None
+    narration_audio_status: str = "PENDING"
+    narration_mix_path: Optional[str] = None
+    narration_mix_status: str = "PENDING"
 
 
 class Scene(BaseModel):

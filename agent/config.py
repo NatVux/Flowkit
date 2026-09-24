@@ -45,6 +45,9 @@ VIDEO_POLL_TIMEOUT = int(os.environ.get("VIDEO_POLL_TIMEOUT", "420"))
 API_COOLDOWN = int(os.environ.get("API_COOLDOWN", "10"))  # seconds between API calls (anti-spam)
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "5"))  # Google Flow max parallel requests
 STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "600"))  # 10 min
+WORKER_OPERATION_TIMEOUT = int(os.environ.get("WORKER_OPERATION_TIMEOUT", "900"))  # 15 min
+RETRY_JITTER_SECONDS = float(os.environ.get("RETRY_JITTER_SECONDS", "3"))
+BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", "0"))
 
 # ─── Model Keys (loaded from models.json for easy updates) ──
 _MODELS_FILE = Path(__file__).parent / "models.json"

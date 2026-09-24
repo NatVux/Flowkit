@@ -27,6 +27,22 @@ class VideoUpdate(BaseModel):
     tags: Optional[str] = None
 
 
+class YouTubeUploadRequest(BaseModel):
+    source_path: str
+    title: str
+    description: str = ""
+    tags: list[str] = []
+    privacy: str = "unlisted"
+    thumbnail_path: Optional[str] = None
+
+
+class YouTubeActionResponse(BaseModel):
+    status: str
+    remote_video_id: Optional[str] = None
+    idempotent: bool = False
+    error: Optional[str] = None
+
+
 class Video(BaseModel):
     id: str
     project_id: str
@@ -41,6 +57,14 @@ class Video(BaseModel):
     duration: Optional[float] = None
     resolution: Optional[str] = None
     youtube_id: Optional[str] = None
+    upload_url: Optional[str] = None
+    youtube_upload_status: str = "NOT_STARTED"
+    youtube_upload_error: Optional[str] = None
+    youtube_upload_attempts: int = 0
+    youtube_uploaded_at: Optional[str] = None
+    youtube_publish_status: str = "NOT_PUBLISHED"
+    youtube_publish_error: Optional[str] = None
+    youtube_published_at: Optional[str] = None
     privacy: str = "unlisted"
     tags: Optional[str] = None
     created_at: Optional[str] = None
