@@ -98,16 +98,19 @@ class TestStoryPlanSchema:
         out = to_gemini_schema(_load())
         voice = _node(out, "characters", "[]", "voice_description")
         narration = _node(out, "scenes", "[]", "narration")
-        assert voice == {"type": ["string", "null"], "description": "At most ~30 words (max 300 characters)"}
-        assert narration == {"type": ["string", "null"], "description": "Max 600 characters"}
+        assert voice == {"type": ["string", "null"], "description":
+                         "ENGLISH. Optional, for characters and creatures: voice tone and pace, "
+                         "at most ~30 words (max 300 characters)"}
+        assert narration == {"type": ["string", "null"], "description":
+                             "In the story language. Voice-over, about 8 seconds (max 600 characters)"}
 
     def test_limits_move_into_description(self):
         out = to_gemini_schema(_load())
         assert _node(out, "characters", "[]", "description")["description"] == \
-            "Visual appearance only (max 600 characters)"
-        assert _node(out, "story")["description"] == "Max 4000 characters"
+            "ENGLISH. Visual appearance only (max 600 characters)"
+        assert _node(out, "story")["description"] == "In the story language (max 4000 characters)"
         assert _node(out, "scenes", "[]", "image_prompt")["description"] == \
-            "Still frame: action, composition, setting (max 1500 characters)"
+            "ENGLISH. Still frame: action, composition, setting; entity names exactly as declared (max 1500 characters)"
         assert _node(out, "scenes")["description"] == "Max 30 items"
         assert _node(out, "characters")["description"] == "Max 12 items"
         assert _node(out, "scenes", "[]", "character_names")["description"] == "Max 10 items"

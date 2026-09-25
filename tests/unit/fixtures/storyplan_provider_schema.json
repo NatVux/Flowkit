@@ -1,16 +1,19 @@
 {
   "properties": {
     "title": {
+      "description": "In the story language",
       "maxLength": 100,
       "minLength": 1,
       "type": "string"
     },
     "logline": {
+      "description": "In the story language. One sentence",
       "maxLength": 300,
       "minLength": 1,
       "type": "string"
     },
     "story": {
+      "description": "In the story language",
       "maxLength": 4000,
       "minLength": 1,
       "type": "string"
@@ -19,6 +22,7 @@
       "items": {
         "properties": {
           "name": {
+            "description": "In the story language; prompts refer to the entity by exactly this name",
             "maxLength": 80,
             "minLength": 1,
             "type": "string"
@@ -34,7 +38,7 @@
             "type": "string"
           },
           "description": {
-            "description": "Visual appearance only",
+            "description": "ENGLISH. Visual appearance only",
             "maxLength": 600,
             "minLength": 1,
             "type": "string"
@@ -49,7 +53,7 @@
                 "type": "null"
               }
             ],
-            "description": "At most ~30 words"
+            "description": "ENGLISH. Optional, for characters and creatures: voice tone and pace, at most ~30 words"
           }
         },
         "required": [
@@ -65,12 +69,13 @@
       "items": {
         "properties": {
           "name": {
+            "description": "In the story language; prompts refer to the entity by exactly this name",
             "maxLength": 80,
             "minLength": 1,
             "type": "string"
           },
           "description": {
-            "description": "Visual appearance only",
+            "description": "ENGLISH. Visual appearance only",
             "maxLength": 600,
             "minLength": 1,
             "type": "string"
@@ -89,18 +94,19 @@
       "items": {
         "properties": {
           "summary": {
+            "description": "In the story language",
             "maxLength": 200,
             "minLength": 1,
             "type": "string"
           },
           "image_prompt": {
-            "description": "Still frame: action, composition, setting",
+            "description": "ENGLISH. Still frame: action, composition, setting; entity names exactly as declared",
             "maxLength": 1500,
             "minLength": 1,
             "type": "string"
           },
           "video_prompt": {
-            "description": "Motion with timing, e.g. '0-4s: ... 4-8s: ...'",
+            "description": "ENGLISH. ~8 seconds of motion as prose or timed beats ('0-4s: ... 4-8s: ...'), then Audio:, SFX: and Negative: lines",
             "maxLength": 1500,
             "minLength": 1,
             "type": "string"
@@ -114,7 +120,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "In the story language. Voice-over, about 8 seconds"
           },
           "character_names": {
             "items": {

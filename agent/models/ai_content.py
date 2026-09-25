@@ -15,7 +15,10 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
-_NAME = Field(min_length=1, max_length=80)
+# Story-language fields vs. fields the image/video models read, which are always English.
+_STORY = "In the story language"
+_EN = "ENGLISH"
+_NAME_DESC = f"{_STORY}; prompts refer to the entity by exactly this name"
 CharacterEntityType = Literal["character", "creature", "visual_asset", "generic_troop", "faction"]
 
 
@@ -30,10 +33,12 @@ class _Output(BaseModel):
 
 
 class PlannedCharacter(_Output):
-    name: str = _NAME
+    name: str = Field(min_length=1, max_length=80, description=_NAME_DESC)
     entity_type: CharacterEntityType = "character"
-    description: str = Field(min_length=1, max_length=600, description="Visual appearance only")
-    voice_description: Optional[str] = Field(None, max_length=300, description="At most ~30 words")
+    description: str = Field(min_length=1, max_length=600, description=f"{_EN}. Visual appearance only")
+    voice_description: Optional[str] = Field(
+        None, max_length=300,
+        description=f"{_EN}. Optional, for characters and creatures: voice tone and pace, at most ~30 words")
 
     @field_validator("name")
     @classmethod
@@ -51,8 +56,8 @@ class PlannedCharacter(_Output):
 
 
 class PlannedLocation(_Output):
-    name: str = _NAME
-    description: str = Field(min_length=1, max_length=600, description="Visual appearance only")
+    name: str = Field(min_length=1, max_length=80, description=_NAME_DESC)
+    description: str = Field(min_length=1, max_length=600, description=f"{_EN}. Visual appearance only")
 
     @field_validator("name")
     @classmethod
@@ -61,10 +66,13 @@ class PlannedLocation(_Output):
 
 
 class PlannedScene(_Output):
-    summary: str = Field(min_length=1, max_length=200)
-    image_prompt: str = Field(min_length=1, max_length=1500, description="Still frame: action, composition, setting")
-    video_prompt: str = Field(min_length=1, max_length=1500, description="Motion with timing, e.g. '0-4s: ... 4-8s: ...'")
-    narration: Optional[str] = Field(None, max_length=600)
+    summary: str = Field(min_length=1, max_length=200, description=_STORY)
+    image_prompt: str = Field(min_length=1, max_length=1500,
+                              description=f"{_EN}. Still frame: action, composition, setting; entity names exactly as declared")
+    video_prompt: str = Field(min_length=1, max_length=1500,
+                              description=f"{_EN}. ~8 seconds of motion as prose or timed beats ('0-4s: ... 4-8s: ...'), "
+                                          "then Audio:, SFX: and Negative: lines")
+    narration: Optional[str] = Field(None, max_length=600, description=f"{_STORY}. Voice-over, about 8 seconds")
     character_names: list[str] = Field(default_factory=list, max_length=10)
     continues_previous: bool = False
 
@@ -86,9 +94,9 @@ class PlannedScene(_Output):
 
 
 class StoryPlan(_Output):
-    title: str = Field(min_length=1, max_length=100)
-    logline: str = Field(min_length=1, max_length=300)
-    story: str = Field(min_length=1, max_length=4000)
+    title: str = Field(min_length=1, max_length=100, description=_STORY)
+    logline: str = Field(min_length=1, max_length=300, description=f"{_STORY}. One sentence")
+    story: str = Field(min_length=1, max_length=4000, description=_STORY)
     characters: list[PlannedCharacter] = Field(default_factory=list, max_length=12)
     locations: list[PlannedLocation] = Field(default_factory=list, max_length=12)
     scenes: list[PlannedScene] = Field(min_length=1, max_length=30)

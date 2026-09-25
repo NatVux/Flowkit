@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from agent.db import crud, schema
-from agent.models.ai_content import StoryPlanRequest, YouTubeMetadataRequest
+from agent.models.ai_content import StoryPlan, StoryPlanRequest, YouTubeMetadataRequest
 from agent.services.ai import registry
 from agent.services.ai.base import (
     AIEmptyResponseError, AIMalformedResponseError, AINotConfiguredError, AIPartialResponseError,
@@ -15,7 +15,9 @@ from agent.services.ai.base import (
 )
 from agent.services.ai.gemini import GeminiProvider
 from agent.services.ai.mock import MockAIProvider, default_story_plan, default_youtube_metadata
-from agent.services.ai_content import AIContentService, AIContentUnavailable
+from agent.services.ai_content import (
+    DEFAULT_NEGATIVE_LINE, AIContentService, AIContentUnavailable, check_english_fields, with_negative_line,
+)
 
 SECRET = "AIzaTEST-secret-key-value-123"
 
@@ -495,6 +497,96 @@ class TestApplyMatchesCreateProject:
         with pytest.raises(ValueError):
             await _service(mock)[0].generate_story_plan(_story_req(project, video_id=foreign["id"]))
         assert mock.calls == []
+
+
+class TestStoryPlanContentQuality:
+    """Story-language fields vs. always-English fields, plus the server-side Negative line."""
+
+    VI_PROMPT = "Mèo Đốm đứng lẻ loi giữa lối đi của Chợ Đêm, xung quanh là những đôi chân người qua lại."
+
+    def test_vietnamese_names_inside_english_prompts_pass(self):
+        check_english_fields(StoryPlan.model_validate(_vi_plan()))  # must not raise
+
+    def test_prompt_written_in_vietnamese_fails_naming_the_field(self):
+        plan = _vi_plan()
+        plan["scenes"][1]["image_prompt"] = self.VI_PROMPT
+        with pytest.raises(AIMalformedResponseError, match=r"scenes\[1\]\.image_prompt") as info:
+            check_english_fields(StoryPlan.model_validate(plan))
+        assert "scenes[0]" not in str(info.value)
+
+    def test_vietnamese_entity_description_fails(self):
+        plan = _vi_plan()
+        plan["characters"][0]["description"] = "Một chú mèo con lông trắng, mắt to tròn, trông ngây thơ và sợ sệt"
+        with pytest.raises(AIMalformedResponseError, match=r"characters\[0\]\.description"):
+            check_english_fields(StoryPlan.model_validate(plan))
+
+    def test_existing_project_entity_names_are_ignored(self):
+        plan = _vi_plan()
+        plan["scenes"][0]["image_prompt"] = "Ông Già Nô-en Đỏ waves at Mèo Đốm in Chợ Đêm. Wide shot."
+        plan["scenes"][0]["character_names"].append("Ông Già Nô-en Đỏ")
+        parsed = StoryPlan.model_validate(plan, context={"existing_entity_names": ["Ông Già Nô-en Đỏ"]})
+        check_english_fields(parsed, ["Ông Già Nô-en Đỏ"])
+
+    async def test_non_english_output_is_retried_then_stored(self, project_video):
+        project, _ = project_video
+        bad = _vi_plan()
+        bad["scenes"][0]["video_prompt"] = self.VI_PROMPT
+        mock = MockAIProvider([bad, _vi_plan()])
+        service, sleeps = _service(mock)
+        gen = await service.generate_story_plan(StoryPlanRequest(
+            project_id=project["id"], brief="Mèo con lạc", language="vi", scene_count=3))
+        assert gen["attempts"] == 2 and sleeps.delays == [2.0]
+        assert gen["output"]["scenes"][0]["video_prompt"].startswith("Medium shot 1")
+
+    async def test_non_english_output_without_retries_is_not_stored(self, project_video):
+        project, _ = project_video
+        bad = _vi_plan()
+        bad["scenes"][2]["image_prompt"] = self.VI_PROMPT
+        service, _ = _service(MockAIProvider([bad]), retries=0)
+        with pytest.raises(AIMalformedResponseError, match=r"scenes\[2\]\.image_prompt"):
+            await service.generate_story_plan(StoryPlanRequest(
+                project_id=project["id"], brief="x", language="vi", scene_count=3))
+        assert await _row_count("ai_generation") == 0
+
+    async def test_prompt_separates_story_language_from_english_fields(self, project_video):
+        project, _ = project_video
+        mock = MockAIProvider([_vi_plan()])
+        await _service(mock)[0].generate_story_plan(StoryPlanRequest(
+            project_id=project["id"], brief="x", language="vi", scene_count=3))
+        request = mock.calls[0]
+        assert "Story language: vi" in request.prompt
+        assert "ALWAYS English" in request.system_instruction and "voice_description" in request.system_instruction
+        props = request.response_schema["properties"]
+        assert props["story"]["description"].startswith("In the story language")
+        assert props["scenes"]["items"]["properties"]["image_prompt"]["description"].startswith("ENGLISH")
+
+    def test_negative_line_is_added_only_when_missing(self):
+        timed = "0-4s: Mèo Đốm looks around. 4-8s: slow push-in."
+        assert with_negative_line(timed) == f"{timed}\n\n{DEFAULT_NEGATIVE_LINE}"
+        assert DEFAULT_NEGATIVE_LINE == "Negative: subtitles, text overlays, watermark, distorted faces."
+        prose = "Medium shot. The camera holds.\n\nAudio: hum.\nNegative: subtitles, watermark."
+        assert with_negative_line(prose) == prose
+
+    async def test_apply_writes_timed_and_prose_video_prompts_with_a_negative_line(self, project_video):
+        project, video = project_video
+        plan = _vi_plan()
+        plan["scenes"][0]["video_prompt"] = "0-4s: Mèo Đốm looks around. 4-8s: slow push-in on Mèo Đốm."
+        service, _ = _service(MockAIProvider([plan]))
+        gen = await service.generate_story_plan(StoryPlanRequest(
+            project_id=project["id"], brief="x", language="vi", scene_count=3))
+        await service.apply_generation(gen["id"], video["id"])
+        scenes = await crud.list_scenes(video["id"])
+        assert scenes[0]["video_prompt"].endswith("\n\n" + DEFAULT_NEGATIVE_LINE)
+        assert scenes[1]["video_prompt"] == plan["scenes"][1]["video_prompt"]  # already had one: untouched
+        assert scenes[1]["video_prompt"].count("Negative:") == 1
+
+    def test_voice_description_stays_optional(self):
+        plan = _vi_plan()
+        for c in plan["characters"]:
+            c.pop("voice_description", None)
+        parsed = StoryPlan.model_validate(plan)
+        assert all(c.voice_description is None for c in parsed.characters)
+        check_english_fields(parsed)
 
 
 class TestYouTubeMetadata:

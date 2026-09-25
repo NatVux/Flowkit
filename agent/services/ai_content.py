@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Awaitable, Callable, TypeVar
@@ -48,17 +49,26 @@ _MAX_BACKOFF_SECONDS = 30.0
 STORY_SYSTEM = (
     "You plan short AI-generated videos. You write text only; a separate image/video model renders it. "
     "Return JSON matching the schema exactly.\n"
+    "Languages:\n"
+    "- title, logline, story, each scene summary and narration: the story language given below.\n"
+    "- Every entity description, image_prompt, video_prompt and voice_description: ALWAYS English, whatever "
+    "the story language - the image and video models read them.\n"
+    "- Entity names stay in the story language, and prompts refer to each entity by exactly that name "
+    "(e.g. 'Wide shot of Mèo Con in Chợ Đêm').\n"
     "Rules:\n"
     "- characters/locations: every person, creature, recurring object or place that must look the same "
-    "across scenes. description = visual appearance only (no actions, no story).\n"
+    "across scenes. description = visual appearance only (no actions, no story). Give each character and "
+    "creature a voice_description when it could speak or make sounds (tone and pace, at most ~30 words); "
+    "it is optional.\n"
     "- Each scene image_prompt describes ONE still frame: action, environment, mood, then a camera/composition "
     "cue (shot size, angle). Refer to entities by their exact name; never restate their appearance, clothing "
     "or colours - reference images handle that.\n"
     "- Faces: when a character is in frame, show the full face (front, three-quarter or profile). Never frame a "
     "character from behind, crop the face, or make it tiny - the video model would invent the missing face. "
     "If the face should not be seen, use a hands-only point-of-view shot or leave the character out.\n"
-    "- video_prompt is natural prose for ~8 seconds, like briefing a film director, 100-150 words: 2-3 shots "
-    "joined with 'Then cut to', the camera movement as its own sentence, and a lighting description. Dialogue, "
+    "- video_prompt covers ~8 seconds, 100-150 words, either as prose (2-3 shots joined with 'Then cut to') "
+    "or as timed beats ('0-3s: ... 3-6s: ... 6-8s: ...'); give the camera movement its own sentence and "
+    "describe the lighting. Dialogue, "
     "if any, is short and written as: Name says: \"line\" (no subtitles). End with three separate lines: "
     "'Audio: ...', 'SFX: ...', 'Negative: subtitles, watermark, text overlay.'\n"
     "- character_names lists the exact names of every defined character/location visible in the scene.\n"
@@ -118,7 +128,8 @@ class AIContentService:
     # ── core: call, parse, validate, retry ──────────────────
 
     async def _generate(self, operation: str, system: str, prompt: str, model_cls: type[T],
-                        context: dict, validation_context: dict | None = None) -> tuple[T, dict]:
+                        context: dict, validation_context: dict | None = None,
+                        post_check: Callable[[T], None] | None = None) -> tuple[T, dict]:
         provider = self._provider()
         request_id = str(uuid.uuid4())
         schema = provider_schema(model_cls)
@@ -135,6 +146,8 @@ class AIContentService:
                     response_schema=schema, request_id=request_id, timeout_seconds=self.timeout_seconds,
                 ))
                 result = _parse(response.text, model_cls, validation_context)
+                if post_check:
+                    post_check(result)  # raises AIMalformedResponseError, retried like any malformed output
             except AIProviderError as exc:
                 duration = round((time.monotonic() - started) * 1000)
                 will_retry = exc.retryable and attempt < attempts
@@ -177,7 +190,8 @@ class AIContentService:
         lines = [
             f"Brief: {req.brief}",
             f"Number of scenes: exactly {req.scene_count}",
-            f"Language for story, narration and summaries: {language}. Keep prompts in English.",
+            f"Story language: {language} (title, logline, story, summaries, narration, entity names). "
+            "Entity descriptions, image_prompt, video_prompt and voice_description: English.",
         ]
         if orientation in _FRAMING:
             lines.append(_FRAMING[orientation])
@@ -190,9 +204,11 @@ class AIContentService:
         if existing:
             reuse = ", ".join(f"{c['name']} ({c['entity_type']})" for c in existing[:30])
             lines.append(f"Entities that already exist in this project (reuse these exact names when they appear): {reuse}")
+        existing_names = [c["name"] for c in existing]
         plan, meta = await self._generate("story_plan", STORY_SYSTEM, "\n".join(lines), StoryPlan,
                                           {"project_id": req.project_id},
-                                          {"existing_entity_names": [c["name"] for c in existing]})
+                                          {"existing_entity_names": existing_names},
+                                          lambda p: check_english_fields(p, existing_names))
         if len(plan.scenes) != req.scene_count:
             log_event(logger, logging.WARNING, "ai_scene_count_mismatch", request_id=meta["request_id"],
                       requested=req.scene_count, returned=len(plan.scenes))
@@ -308,6 +324,53 @@ def _parse(text: str, model_cls: type[T], context: dict | None = None) -> T:
         raise AIMalformedResponseError(f"response failed validation: {problems}") from exc
 
 
+# ── story-plan content checks ───────────────────────────────
+
+#: Above this share of accented words (entity names removed) a field is not English.
+#: Vietnamese prose sits around 60-90%; English with a loanword ("a blue áo bà ba") stays well below.
+ENGLISH_MAX_ACCENTED_SHARE = 0.35
+DEFAULT_NEGATIVE_LINE = "Negative: subtitles, text overlays, watermark, distorted faces."
+_WORD = re.compile(r"[^\W\d_]+")
+_NEGATIVE = re.compile(r"\bnegative\s*:", re.IGNORECASE)
+
+
+def _accented_share(text: str, names: list[str]) -> float:
+    for name in sorted(names, key=len, reverse=True):  # longest first: "Bà Cụ" before "Bà"
+        text = re.sub(re.escape(name), " ", text, flags=re.IGNORECASE)
+    words = _WORD.findall(text)
+    return sum(1 for w in words if not w.isascii()) / len(words) if words else 0.0
+
+
+def check_english_fields(plan: StoryPlan, extra_names: list[str] = ()) -> None:
+    """Post-check (not schema validation): fields the image/video models read must be English.
+
+    Entity names may stay in the story language, so they are removed before measuring.
+    Raises AIMalformedResponseError naming each offending field, so the normal retry runs.
+    """
+    names = [e.name for e in (*plan.characters, *plan.locations)] + list(extra_names)
+    fields = []
+    for i, c in enumerate(plan.characters):
+        fields += [(f"characters[{i}].description", c.description),
+                   (f"characters[{i}].voice_description", c.voice_description)]
+    fields += [(f"locations[{i}].description", loc.description) for i, loc in enumerate(plan.locations)]
+    for i, s in enumerate(plan.scenes):
+        fields += [(f"scenes[{i}].image_prompt", s.image_prompt), (f"scenes[{i}].video_prompt", s.video_prompt)]
+    bad = []
+    for path, text in fields:
+        share = _accented_share(text, names) if text else 0.0
+        if share > ENGLISH_MAX_ACCENTED_SHARE:
+            bad.append(f"{path} ({share:.0%} accented words)")
+    if bad:
+        raise AIMalformedResponseError("response failed language check, must be English: " + "; ".join(bad))
+
+
+def with_negative_line(video_prompt: str) -> str:
+    """Accept prose or timed beats as-is; only add a default Negative line when there is none."""
+    if _NEGATIVE.search(video_prompt):
+        return video_prompt
+    return f"{video_prompt.rstrip()}\n\n{DEFAULT_NEGATIVE_LINE}"
+
+
 async def _story_rows(plan: StoryPlan, project_id: str) -> dict:
     """Turn a validated plan into DB-ready rows, using the same builders as project creation."""
     from agent.api.projects import _build_character_profile
@@ -334,7 +397,7 @@ async def _story_rows(plan: StoryPlan, project_id: str) -> dict:
     for sc in plan.scenes:
         prompt = sc.image_prompt if not prefix or sc.image_prompt.startswith(prefix) else f"{prefix} {sc.image_prompt}"
         scenes.append({
-            "prompt": prompt, "video_prompt": sc.video_prompt, "narrator_text": sc.narration,
+            "prompt": prompt, "video_prompt": with_negative_line(sc.video_prompt), "narrator_text": sc.narration,
             "character_names": sc.character_names, "continues_previous": sc.continues_previous,
         })
     return {"entities": entities, "scenes": scenes}
