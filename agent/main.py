@@ -133,6 +133,9 @@ async def lifespan(app: FastAPI):
 
     # Start background tasks
     ws_task = asyncio.create_task(run_ws_server())
+    # Orphaned PROCESSING rows from the previous process go back to PENDING before
+    # the worker (or anything else) can claim or read them.
+    await controller.recover_orphaned()
     worker_task = asyncio.create_task(controller.start())
     backup_task = (
         asyncio.create_task(run_backup_scheduler(BACKUP_INTERVAL_SECONDS))

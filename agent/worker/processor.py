@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -18,7 +19,7 @@ from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
 from agent.config import (
     POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS,
-    STALE_PROCESSING_TIMEOUT, WORKER_OPERATION_TIMEOUT, RETRY_JITTER_SECONDS,
+    WORKER_OPERATION_TIMEOUT, RETRY_JITTER_SECONDS,
 )
 from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import (
@@ -75,6 +76,7 @@ class WorkerController:
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
+        self._recovered = False
 
     @property
     def active_count(self) -> int:
@@ -82,9 +84,24 @@ class WorkerController:
         return len(self._active_ids)
 
     async def start(self):
-        """Start the worker loop."""
-        await self._cleanup_stale_processing()
+        """Start the worker loop (recovering orphans first if the caller has not)."""
+        if not self._recovered:
+            await self.recover_orphaned()
         await self._run_loop()
+
+    async def recover_orphaned(self):
+        """Reset every PROCESSING request left by the previous process back to PENDING.
+
+        Must run before the worker claims anything: at that point no task of this
+        process can own a PROCESSING row, so all of them are orphans, however recent.
+        """
+        try:
+            count = await crud.reset_orphaned_processing()
+            if count:
+                logger.info("Reset %d orphaned PROCESSING requests to PENDING", count)
+        except Exception as e:
+            logger.warning("Could not reset orphaned requests: %s", e)
+        self._recovered = True
 
     def request_shutdown(self):
         """Signal the worker to stop and let active tasks be cancelled by drain."""
@@ -102,23 +119,19 @@ class WorkerController:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _cleanup_stale_processing(self):
-        """Reset any requests stuck in PROCESSING state from a previous run."""
-        try:
-            stale_count = await crud.reset_stale_processing(
-                cutoff_minutes=max(1, (STALE_PROCESSING_TIMEOUT + 59) // 60)
-            )
-            if stale_count:
-                logger.info("Cleaned up %d stale PROCESSING requests", stale_count)
-        except Exception as e:
-            logger.warning("Could not clean up stale requests: %s", e)
-
     async def _run_loop(self):
         client = get_flow_client()
 
         while not self._shutdown.is_set():
             try:
                 if not client.connected:
+                    await self._sleep_or_shutdown(POLL_INTERVAL)
+                    continue
+
+                # During the UNUSUAL_ACTIVITY cooldown every generation call is refused
+                # locally; claiming now would only turn waiting requests into FAILED ones.
+                # Every queue type submits a guarded generation call, so claim nothing.
+                if generation_cooldown_active(client):
                     await self._sleep_or_shutdown(POLL_INTERVAL)
                     continue
 
@@ -486,7 +499,31 @@ def _retry_at(delay_seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds + jitter)).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+#: Content-policy rejections: the same prompt and refs fail the same way, and each retry
+#: is another paid generation. Matched as exact codes only, never loose wording.
+_CONTENT_POLICY_CODE = re.compile(r"\bPUBLIC_ERROR_(?:UNSAFE_GENERATION|MINOR_INPUT_IMAGE)\b")
+
+#: Re-uploading media for a "not found" error is capped per request, so a job that keeps
+#: coming back not-found fails clearly instead of cycling forever.
+MAX_NOT_FOUND_RECOVERIES = 2
+_RECOVERY_MARK = re.compile(r"^not_found_recovery=(\d+);")
+
+
+def generation_cooldown_active(client) -> bool:
+    """True while the Flow client's UNUSUAL_ACTIVITY cooldown refuses generation calls."""
+    status = getattr(client, "generation_guard_status", None)
+    return bool(isinstance(status, dict) and status.get("cooldown_active"))
+
+
+def content_policy_code(error: str) -> str | None:
+    """PUBLIC_ERROR_UNSAFE_GENERATION / PUBLIC_ERROR_MINOR_INPUT_IMAGE if the error carries one."""
+    match = _CONTENT_POLICY_CODE.search(error or "")
+    return match.group(0) if match else None
+
+
 def _is_retryable_error(error: str) -> bool:
+    if content_policy_code(error):
+        return False
     permanent_markers = (
         "unsupported_on_batch_api", "no_flow_project", "invalid request",
         "permission denied", "unauthorized", "forbidden", "not configured",
@@ -518,12 +555,25 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     if isinstance(error_msg, dict):
         error_msg = json.dumps(error_msg)[:200]
 
-    # Auto-recover expired media by re-uploading
-    if "not found" in str(error_msg).lower():
+    # Auto-recover expired media by re-uploading. A video poll timeout also quotes Flow's
+    # "Media not found." - that is a still-running job, not missing media: re-uploading the
+    # image would change the scene's image id under a render made from the old one, so it
+    # takes the normal counted retry (which re-polls the stored operation).
+    lower_msg = str(error_msg).lower()
+    if "not found" in lower_msg and not lower_msg.startswith("polling timeout"):
+        mark = _RECOVERY_MARK.match(req.get("last_failure_reason") or "")
+        recoveries = int(mark.group(1)) if mark else 0
+        if recoveries >= MAX_NOT_FOUND_RECOVERIES:
+            message = f"not found after {recoveries} media re-upload recoveries: {error_msg}"
+            await _set_request_status(req, "FAILED", error_message=message, last_failure_reason=message)
+            await _mark_scene_failed(req)
+            log_event(logger, logging.ERROR, "job_failed", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), final_status="FAILED", reason="not_found_recovery_limit")
+            return
         recovered = await _recover_entity_not_found(req)
         if recovered:
-            log_event(logger, logging.WARNING, "retry_scheduled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), reason="expired_media_recovered")
-            await _set_request_status(req, "PENDING", error_message=f"recovered: {error_msg}", last_failure_reason=str(error_msg))
+            log_event(logger, logging.WARNING, "retry_scheduled", request_id=rid, project_id=req.get("project_id"), video_id=req.get("video_id"), scene_id=req.get("scene_id"), operation=req.get("type"), reason="expired_media_recovered", attempt=recoveries + 1)
+            await _set_request_status(req, "PENDING", error_message=f"recovered: {error_msg}",
+                                      last_failure_reason=f"not_found_recovery={recoveries + 1}; {error_msg}")
             return
 
     error_lower = str(error_msg).lower()
