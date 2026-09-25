@@ -63,6 +63,8 @@ STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "600")
 WORKER_OPERATION_TIMEOUT = int(os.environ.get("WORKER_OPERATION_TIMEOUT", "900"))  # 15 min
 RETRY_JITTER_SECONDS = float(os.environ.get("RETRY_JITTER_SECONDS", "3"))
 BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", "0"))
+# Pipeline runner loop (docs/PIPELINE_RUNNER.md). Runs only move when started/approved.
+PIPELINE_RUNNER_ENABLED = os.environ.get("PIPELINE_RUNNER_ENABLED", "1") == "1"
 
 # ─── Model Keys (loaded from models.json for easy updates) ──
 _MODELS_FILE = Path(__file__).parent / "models.json"

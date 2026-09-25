@@ -12,7 +12,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS, PIPELINE_RUNNER_ENABLED
+from agent.services.pipeline.runner import get_pipeline_runner
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -141,14 +142,19 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_backup_scheduler(BACKUP_INTERVAL_SECONDS))
         if BACKUP_INTERVAL_SECONDS > 0 else None
     )
+    runner = get_pipeline_runner()
+    runner_task = asyncio.create_task(runner.start()) if PIPELINE_RUNNER_ENABLED else None
     log_event(logger, logging.INFO, "worker_started")
 
     yield
 
+    runner.request_shutdown()
     controller.request_shutdown()
     await controller.drain()
     ws_task.cancel()
     worker_task.cancel()
+    if runner_task:
+        runner_task.cancel()
     if backup_task:
         backup_task.cancel()
     await close_db()
