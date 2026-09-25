@@ -215,6 +215,63 @@ CREATE TABLE IF NOT EXISTS ai_generation (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_generation_project ON ai_generation(project_id, created_at);
 
+-- Pipeline runner: one run drives refs -> images -> videos -> concat for one video
+-- through the ordinary request queue. See docs/PIPELINE_RUNNER.md.
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    id                 TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    video_id           TEXT NOT NULL REFERENCES video(id) ON DELETE CASCADE,
+    orientation        TEXT NOT NULL CHECK(orientation IN ('VERTICAL','HORIZONTAL')),
+    status             TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN (
+                           'DRAFT','RUNNING','AWAITING_APPROVAL','PAUSED','NEEDS_USER_ACTION',
+                           'COMPLETED','CANCELLED','FAILED')),
+    stage              TEXT CHECK(stage IN ('REFS','IMAGES','VIDEOS','CONCAT')),
+    wave               INTEGER,
+    pause_reason       TEXT,
+    status_detail      TEXT,
+    checkpoints_json   TEXT NOT NULL DEFAULT '["REFS","IMAGES"]',
+    options_json       TEXT NOT NULL DEFAULT '{}',
+    estimate_json      TEXT NOT NULL DEFAULT '{}',
+    warnings_json      TEXT NOT NULL DEFAULT '[]',
+    disconnected_since TEXT,
+    final_path         TEXT,
+    error              TEXT,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    started_at         TEXT,
+    finished_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_video ON pipeline_run(video_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_status ON pipeline_run(status);
+-- At most one unfinished run per video.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_run_active_video ON pipeline_run(video_id)
+    WHERE status IN ('DRAFT','RUNNING','AWAITING_APPROVAL','PAUSED','NEEDS_USER_ACTION');
+
+CREATE TABLE IF NOT EXISTS pipeline_run_item (
+    id                   TEXT PRIMARY KEY,
+    run_id               TEXT NOT NULL REFERENCES pipeline_run(id) ON DELETE CASCADE,
+    stage                TEXT NOT NULL CHECK(stage IN ('REFS','IMAGES','VIDEOS')),
+    target_type          TEXT NOT NULL CHECK(target_type IN ('character','scene')),
+    target_id            TEXT NOT NULL,
+    wave                 INTEGER NOT NULL DEFAULT 0,
+    request_type         TEXT,
+    request_id           TEXT REFERENCES request(id) ON DELETE SET NULL,
+    status               TEXT NOT NULL DEFAULT 'PLANNED' CHECK(status IN (
+                             'PLANNED','SUBMITTED','COMPLETED','FAILED','NEEDS_USER_ACTION','SKIPPED','CANCELLED')),
+    error_code           TEXT,
+    error_message        TEXT,
+    local_path           TEXT,
+    download_status      TEXT CHECK(download_status IN ('PENDING','DOWNLOADED','FAILED')),
+    download_attempts    INTEGER NOT NULL DEFAULT 0,
+    redo_count           INTEGER NOT NULL DEFAULT 0,
+    request_history_json TEXT NOT NULL DEFAULT '[]',
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE(run_id, stage, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_item_run ON pipeline_run_item(run_id, stage, wave);
+CREATE INDEX IF NOT EXISTS idx_pipeline_item_request ON pipeline_run_item(request_id);
+
 CREATE INDEX IF NOT EXISTS idx_scene_video ON scene(video_id);
 CREATE INDEX IF NOT EXISTS idx_scene_order ON scene(video_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);
