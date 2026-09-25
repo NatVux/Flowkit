@@ -275,6 +275,64 @@ async def release_requests(run_id: str) -> int:
             return cur.rowcount
 
 
+#: A held request's next_retry_at; anything this far out was held by a run.
+HOLD_THRESHOLD = "9000-01-01"
+_HELD_BY = "held by pipeline run "
+
+
+def _never_reached_flow(row) -> bool:
+    return row["started_at"] is None and not row["retry_count"] and not row["flow_op"]
+
+
+async def sweep_orphaned_holds() -> dict:
+    """Free held requests whose run is gone or finished (CANCELLED/COMPLETED/FAILED/deleted).
+
+    A hold is only lifted by its run (resume/cancel). If the run ended without that -
+    a crash between hold and cancel, a deleted run - the request would stay PENDING and
+    unclaimable forever, and the deduplicating enqueue would keep handing it back to a
+    manual /fk-gen-images. Never-started ones are deleted; the rest are released.
+    """
+    db = await get_db()
+    now = _now()
+    deleted, released = [], []
+    async with schema._db_lock:
+        async with transaction(db):
+            cur = await db.execute(
+                """SELECT r.id, r.started_at, r.retry_count, r.request_id AS flow_op, r.last_failure_reason,
+                          (SELECT COUNT(*) FROM pipeline_run_item i JOIN pipeline_run pr ON pr.id = i.run_id
+                            WHERE i.request_id = r.id AND pr.status IN ({})) AS active_owners
+                   FROM request r WHERE r.status='PENDING' AND r.next_retry_at >= ?""".format(
+                    ",".join("?" for _ in ACTIVE_RUN_STATUSES)),
+                (*ACTIVE_RUN_STATUSES, HOLD_THRESHOLD))
+            for row in await cur.fetchall():
+                if row["active_owners"]:
+                    continue
+                reason = row["last_failure_reason"] or ""
+                if reason.startswith(_HELD_BY):  # the run named in the hold may still be active
+                    owner_id = reason[len(_HELD_BY):].split(":", 1)[0]
+                    owner = await db.execute("SELECT status FROM pipeline_run WHERE id=?", (owner_id,))
+                    status = await owner.fetchone()
+                    if status is not None and status[0] in ACTIVE_RUN_STATUSES:
+                        continue
+                items = await db.execute(
+                    "SELECT id, request_history_json FROM pipeline_run_item WHERE request_id=?", (row["id"],))
+                for item in await items.fetchall():
+                    history = json.loads(item["request_history_json"] or "[]")
+                    history.append({"request_id": row["id"], "at": now, "reason":
+                                    "orphaned hold removed" if _never_reached_flow(row) else "orphaned hold released"})
+                    await db.execute("UPDATE pipeline_run_item SET request_history_json=?, updated_at=? WHERE id=?",
+                                     (json.dumps(history, ensure_ascii=False), now, item["id"]))
+                if _never_reached_flow(row):
+                    await db.execute("DELETE FROM request WHERE id=?", (row["id"],))
+                    deleted.append(row["id"])
+                else:
+                    await db.execute(
+                        "UPDATE request SET next_retry_at=NULL, last_failure_reason=?, updated_at=? WHERE id=?",
+                        (f"hold released: owning pipeline run ended ({reason[:200]})", now, row["id"]))
+                    released.append(row["id"])
+    return {"deleted": deleted, "released": released}
+
+
 async def cancel_unstarted_requests(run_id: str) -> dict:
     """For a cancelled run: delete queued requests that never reached Flow, release the rest.
 

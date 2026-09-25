@@ -47,6 +47,10 @@ async def _claimed(req_type="GENERATE_IMAGE", **scene_fields):
 # ─── W1: content-policy codes are terminal ──────────────────
 
 class TestContentPolicyCodes:
+    # The first string reuses the shape of a REAL batchexecute error (seen for
+    # PUBLIC_ERROR_UNUSUAL_ACTIVITY: "[7, None, [['...ErrorInfo', ['PUBLIC_ERROR_…']]]]") with the
+    # code swapped. No real content-policy rejection has been captured, so whether Flow sends
+    # that reason string at all is unconfirmed - see docs/PIPELINE_RUNNER.md.
     @pytest.mark.parametrize("error", [
         "RpcError: ogiZ0b failed: [3, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_UNSAFE_GENERATION']]]]",
         "Invalid prompt [PUBLIC_ERROR_MINOR_INPUT_IMAGE]",

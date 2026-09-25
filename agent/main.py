@@ -138,6 +138,8 @@ async def lifespan(app: FastAPI):
     # Orphaned PROCESSING rows from the previous process go back to PENDING before
     # the worker (or anything else) can claim or read them.
     await controller.recover_orphaned()
+    # Requests held by a pipeline run that ended or vanished must not stay unclaimable.
+    await get_pipeline_runner().sweep_holds()
     worker_task = asyncio.create_task(controller.start())
     backup_task = (
         asyncio.create_task(run_backup_scheduler(BACKUP_INTERVAL_SECONDS))

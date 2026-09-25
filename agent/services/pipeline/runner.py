@@ -66,7 +66,21 @@ class PipelineRunner:
     def request_shutdown(self):
         self._shutdown.set()
 
+    async def sweep_holds(self) -> dict:
+        """Free requests held by a run that has ended or no longer exists (logged)."""
+        try:
+            result = await pc.sweep_orphaned_holds()
+        except Exception:
+            logger.exception("sweeping orphaned pipeline holds failed")
+            return {"deleted": [], "released": []}
+        if result["deleted"] or result["released"]:
+            logger.warning("Orphaned pipeline holds: deleted %d never-started request(s) %s, released %d %s",
+                           len(result["deleted"]), [r[:8] for r in result["deleted"]],
+                           len(result["released"]), [r[:8] for r in result["released"]])
+        return result
+
     async def tick_all(self):
+        await self.sweep_holds()
         for run in await pc.list_runs(statuses=("RUNNING",)):
             try:
                 await self.tick(run["id"])

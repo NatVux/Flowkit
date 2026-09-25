@@ -93,6 +93,19 @@ Transient errors (network, captcha, Flow 5xx…) stay with the worker's own
 retry policy ([REQUEST_LIFECYCLE.md](REQUEST_LIFECYCLE.md)); the runner never
 resubmits content failures by itself.
 
+**Unconfirmed: how a content-filter rejection looks on the batch API.** A
+batchexecute error slot is recorded as `RpcError: <rpcid> failed: <repr of the
+slot>`. The only shape seen for real is `[7, None, [['type.googleapis.com/google.rpc.ErrorInfo',
+['PUBLIC_ERROR_UNUSUAL_ACTIVITY']]]]`, where the reason code survives verbatim;
+bare codes such as `[8]` also occur. If a rejection arrives as
+`ErrorInfo` with `PUBLIC_ERROR_UNSAFE_GENERATION` / `PUBLIC_ERROR_MINOR_INPUT_IMAGE`,
+it is recognised. If it arrives as a bare `[3]` (gRPC INVALID_ARGUMENT, also
+used for malformed payloads), as an image payload without media ("Image
+generation returned no media url"), or as a failed video operation ("Operation
+failed: <name>", whose complaint text is not kept), it is **not**: the worker
+retries it like any error and the item ends `FAILED_AFTER_RETRIES`. Capture a
+real rejection before adding a rule for it.
+
 ## API
 
 | Endpoint | Body | Effect |
@@ -165,6 +178,14 @@ No request status was added.
   status change — and records each in its item's history. Requests that did
   reach Flow are released to finish, because a running Flow job cannot be
   recalled; their results are kept.
+- **Orphaned holds** — at startup and on every runner tick, a `PENDING`
+  request whose `next_retry_at` is at or after `9000-01-01` and whose run is
+  `CANCELLED` / `COMPLETED` / `FAILED` or no longer exists is freed: deleted if
+  it never reached Flow, otherwise released (`next_retry_at` cleared). Logged
+  as "Orphaned pipeline holds …" and noted in the item history. Without this, a
+  run that ended between holding and cleaning up (a crash) would leave the
+  request unclaimable, and a manual `/fk-gen-images` would keep being handed
+  that dead request by the deduplicating enqueue.
 
 ## Restarts and duplicates
 
