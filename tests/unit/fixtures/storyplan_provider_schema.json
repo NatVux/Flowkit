@@ -1,0 +1,149 @@
+{
+  "properties": {
+    "title": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "logline": {
+      "maxLength": 300,
+      "minLength": 1,
+      "type": "string"
+    },
+    "story": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "characters": {
+      "items": {
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "entity_type": {
+            "enum": [
+              "character",
+              "creature",
+              "visual_asset",
+              "generic_troop",
+              "faction"
+            ],
+            "type": "string"
+          },
+          "description": {
+            "description": "Visual appearance only",
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          },
+          "voice_description": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "At most ~30 words"
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "type": "object"
+      },
+      "maxItems": 12,
+      "type": "array"
+    },
+    "locations": {
+      "items": {
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": {
+            "description": "Visual appearance only",
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "type": "object"
+      },
+      "maxItems": 12,
+      "type": "array"
+    },
+    "scenes": {
+      "items": {
+        "properties": {
+          "summary": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "image_prompt": {
+            "description": "Still frame: action, composition, setting",
+            "maxLength": 1500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "video_prompt": {
+            "description": "Motion with timing, e.g. '0-4s: ... 4-8s: ...'",
+            "maxLength": 1500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "narration": {
+            "anyOf": [
+              {
+                "maxLength": 600,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "character_names": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "continues_previous": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "summary",
+          "image_prompt",
+          "video_prompt"
+        ],
+        "type": "object"
+      },
+      "maxItems": 30,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "title",
+    "logline",
+    "story",
+    "scenes"
+  ],
+  "type": "object"
+}

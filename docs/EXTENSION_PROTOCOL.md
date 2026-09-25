@@ -2,6 +2,13 @@
 
 The Manifest V3 service worker connects to `ws://127.0.0.1:9222`. The Python agent sends commands; the extension executes Flow work in the signed-in Flow tab and returns responses through the authenticated local callback endpoint when a request id is present.
 
+## Endpoints and authentication
+
+- WebSocket URL `ws://127.0.0.1:9222` (`AGENT_WS_URL`) and callback URL `http://127.0.0.1:8100/api/ext/callback` are hard-coded in `extension/background.js`; `manifest.json` grants host permission for `http://127.0.0.1:8100/*` only. The agent's `WS_PORT` / `API_PORT` must stay at their defaults unless these are edited.
+- On each WebSocket connect the agent sends `{"type":"callback_secret","secret":"…"}`. The secret is generated once per agent process. The extension stores it and sends it as `X-Callback-Secret` on every callback; a wrong or missing secret gets HTTP 401. A callback for an id the agent is no longer waiting for returns `{"ok": false, "reason": "no matching pending request"}`.
+- The agent waits up to 300 s per command by default. If no extension is connected, the call returns `{"error": "Extension not connected"}` without being sent.
+- The service worker keeps itself alive with a `keepAlive` alarm (every 0.4 min) and reconnects through a `reconnect` alarm about 5 s after an unexpected close.
+
 ## Command envelope
 
 ```json

@@ -359,7 +359,7 @@ async def capture_scene_character_references(scene_id: str, character_ids: list[
     for character_id in character_ids:
         cur = await db.execute("SELECT * FROM character WHERE id=?", (character_id,))
         character_row = await cur.fetchone()
-        asset = await ensure_character_reference(dict(character_row)) if character_row else None
+        asset = await ensure_character_reference_version(dict(character_row)) if character_row else None
         if not await validate_character_reference(asset):
             raise ValueError(f"Missing or invalid reference asset for character {character_id}")
         assets.append(asset)
@@ -591,3 +591,155 @@ async def list_materials() -> list[dict]:
     db = await get_db()
     cur = await db.execute("SELECT * FROM material ORDER BY created_at")
     return [dict(r) for r in await cur.fetchall()]
+
+
+# ─── AI generation (validated provider output) ──────────────
+
+class AIGenerationConflict(RuntimeError):
+    """The generation was already applied, or does not match the target."""
+
+
+def _ai_generation_row(row) -> dict:
+    data = dict(row)
+    data["output"] = json.loads(data.pop("output_json"))
+    data["input"] = json.loads(data.pop("input_json"))
+    return data
+
+
+async def create_ai_generation(*, operation: str, provider: str, model: str, project_id: str,
+                               request_id: str, attempts: int, input_data: dict, output_data: dict,
+                               video_id: str = None) -> dict:
+    db = await get_db()
+    gid, now = _uuid(), _now()
+    async with schema._db_lock:
+        async with transaction(db):
+            await db.execute(
+                """INSERT INTO ai_generation (id,operation,status,provider,model,project_id,video_id,request_id,
+                   attempts,input_json,output_json,created_at,updated_at) VALUES (?,?,'GENERATED',?,?,?,?,?,?,?,?,?,?)""",
+                (gid, operation, provider, model, project_id, video_id, request_id, attempts,
+                 json.dumps(input_data), json.dumps(output_data), now, now))
+    return await get_ai_generation(gid)
+
+
+async def get_ai_generation(gid: str) -> Optional[dict]:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM ai_generation WHERE id=?", (gid,))
+    row = await cur.fetchone()
+    return _ai_generation_row(row) if row else None
+
+
+async def list_ai_generations(project_id: str) -> list[dict]:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM ai_generation WHERE project_id=? ORDER BY created_at DESC", (project_id,))
+    return [_ai_generation_row(r) for r in await cur.fetchall()]
+
+
+async def _claim_generation(db, gid: str, operation: str, video_id: str, now: str) -> dict:
+    cur = await db.execute("SELECT operation, status, project_id FROM ai_generation WHERE id=?", (gid,))
+    gen = await cur.fetchone()
+    if gen is None:
+        raise LookupError("AI generation not found")
+    if gen[0] != operation:
+        raise AIGenerationConflict(f"generation is {gen[0]}, not {operation}")
+    if gen[1] != "GENERATED":
+        raise AIGenerationConflict("generation was already applied")
+    cur = await db.execute("SELECT 1 FROM video WHERE id=? AND project_id=?", (video_id, gen[2]))
+    if await cur.fetchone() is None:
+        raise AIGenerationConflict("video does not belong to the generation's project")
+    cur = await db.execute(
+        "UPDATE ai_generation SET status='APPLIED', video_id=?, applied_at=?, updated_at=? WHERE id=? AND status='GENERATED'",
+        (video_id, now, now, gid))
+    if cur.rowcount != 1:
+        raise AIGenerationConflict("generation was applied concurrently")
+    return {"project_id": gen[2]}
+
+
+async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], scenes: list[dict],
+                           story: str | None = None, chain_scenes: bool = False) -> dict:
+    """Write a validated story plan into the project/video in ONE transaction.
+
+    entities: {name, slug, entity_type, description, image_prompt, voice_description}
+    scenes:   {prompt, video_prompt, narrator_text, character_names, continues_previous}
+    chain_scenes: honour continues_previous (CONTINUATION + parent). Otherwise every
+              scene is ROOT, which renders on every video model.
+    Entities already linked to the project (same slug or case-insensitive name)
+    are reused. New ones get a globally unique slug. Scenes are appended after the
+    video's last scene. Nothing is written unless everything succeeds.
+    """
+    from agent.utils.slugify import slugify
+    db = await get_db()
+    now = _now()
+    created, reused, scene_ids = [], [], []
+    async with schema._db_lock:
+        async with transaction(db):
+            claim = await _claim_generation(db, gid, "STORY_PLAN", video_id, now)
+            project_id = claim["project_id"]
+
+            cur = await db.execute(
+                "SELECT c.id, c.name, c.slug FROM character c JOIN project_character pc ON pc.character_id=c.id WHERE pc.project_id=?",
+                (project_id,))
+            linked = [dict(r) for r in await cur.fetchall()]
+            by_key = {}
+            for row in linked:
+                if row["slug"]:
+                    by_key[row["slug"]] = row
+                by_key[row["name"].lower()] = row
+
+            name_map: dict[str, str] = {}
+            for ent in entities:
+                slug = ent.get("slug") or slugify(ent["name"])
+                existing = by_key.get(slug) or by_key.get(ent["name"].lower())
+                if existing:
+                    reused.append(existing["id"])
+                    name_map[ent["name"]] = existing["name"]
+                    continue
+                candidate, n = slug, 2
+                while True:
+                    cur = await db.execute("SELECT 1 FROM character WHERE slug=?", (candidate,))
+                    if await cur.fetchone() is None:
+                        break
+                    candidate, n = f"{slug}_{n}", n + 1
+                cid = _uuid()
+                await db.execute(
+                    """INSERT INTO character (id,name,slug,entity_type,description,image_prompt,voice_description,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (cid, ent["name"], candidate, ent["entity_type"], ent.get("description"),
+                     ent.get("image_prompt"), ent.get("voice_description"), now, now))
+                await db.execute("INSERT INTO project_character (project_id, character_id) VALUES (?,?)", (project_id, cid))
+                created.append(cid)
+                name_map[ent["name"]] = ent["name"]
+
+            cur = await db.execute("SELECT COALESCE(MAX(display_order), -1) FROM scene WHERE video_id=?", (video_id,))
+            order = (await cur.fetchone())[0] + 1
+            previous = None
+            for sc in scenes:
+                sid = _uuid()
+                parent = previous if chain_scenes and sc.get("continues_previous") and previous else None
+                names = [name_map.get(n, n) for n in sc.get("character_names") or []]
+                await db.execute(
+                    """INSERT INTO scene (id,video_id,display_order,prompt,video_prompt,narrator_text,character_names,
+                       parent_scene_id,chain_type,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'root',?,?)""",
+                    (sid, video_id, order, sc["prompt"], sc.get("video_prompt"), sc.get("narrator_text"),
+                     json.dumps(names) if names else None, parent,
+                     "CONTINUATION" if parent else "ROOT", now, now))
+                scene_ids.append(sid)
+                previous, order = sid, order + 1
+
+            if story:
+                await db.execute(
+                    "UPDATE project SET story=?, updated_at=? WHERE id=? AND (story IS NULL OR story='')",
+                    (story, now, project_id))
+    return {"characters_created": created, "characters_reused": reused, "scenes_created": scene_ids}
+
+
+async def apply_youtube_metadata(gid: str, video_id: str, *, title: str, description: str, tags: list[str]) -> dict:
+    """Write validated YouTube metadata onto the video in ONE transaction."""
+    db = await get_db()
+    now = _now()
+    async with schema._db_lock:
+        async with transaction(db):
+            await _claim_generation(db, gid, "YOUTUBE_METADATA", video_id, now)
+            await db.execute(
+                "UPDATE video SET title=?, description=?, tags=?, updated_at=? WHERE id=?",
+                (title, description, json.dumps(tags), now, video_id))
+    return {"video_updated": True}

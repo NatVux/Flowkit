@@ -10,4 +10,6 @@ When a scene image is generated, the current reference version for every named c
 
 Legacy characters with a populated `character.media_id` are promoted to version 1 on first scene use. Missing, invalid, or deleted source files are rejected before generation. Assets are invalidated explicitly rather than deleted; character deletion is restricted when reference history exists, preventing orphaned assets and historical references.
 
-Regeneration creates the next version and updates the character's compatibility pointer. Dependent current scene assets may be invalidated by the pipeline, but historical reference snapshot rows remain queryable.
+Regeneration creates the next version and updates the character's compatibility pointer. It also resets image, video, upscale (both orientations) and the narration mix to `PENDING` on every scene that references the character. Historical reference snapshot rows remain queryable.
+
+Deleting a character that has reference history fails with a foreign-key error (`ON DELETE RESTRICT`); mark its assets `INVALID` instead.

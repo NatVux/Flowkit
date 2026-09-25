@@ -1,82 +1,127 @@
-# Production Deployment
+# Deployment
 
-## Architecture
+Flow Kit is deployed as a long-running process on a desktop machine that also
+runs an interactive, signed-in Chrome. There is no container image, no
+multi-host mode, and no headless mode.
 
-Flow Kit is a local-first orchestration service:
+## Topology
 
 ```text
-Interactive Chrome + Flow tab + MV3 extension
-                 |
-          WebSocket :9222
-                 |
-       Python FastAPI agent :8100
-          |       |        |
-       SQLite  worker   media/output
-                 |
-              FFmpeg
+Interactive Chrome session (same host)
+  ├─ Flow Kit extension (MV3)
+  └─ signed-in flow.google.com tab
+          │  ws://127.0.0.1:9222  +  http://127.0.0.1:8100/api/ext/callback
+          ▼
+Python agent  (python -m agent.main)
+  ├─ REST API :8100   ├─ worker   ├─ SQLite flow_agent.db   └─ output/ media
+          ▲
+Dashboard (optional): Vite dev server :5173, or dashboard/dist behind a proxy
 ```
 
-The Chrome/Flow component must remain a real interactive browser session. It requires a signed-in `flow.google.com` tab, browser cookies, page CSRF state, and reCAPTCHA execution. Do not put the browser bridge in a headless Docker container. Docker may be used for isolated API-only tooling, but it is not the default deployment for the complete system.
+The browser must stay a real interactive session: Flow requires the page's
+cookies, per-page `at` token and reCAPTCHA. Keep the Flow tab open and
+un-discarded.
 
-## Installation
+## Install
 
-1. Install Python 3.10+, FFmpeg, and FFprobe.
-2. Install Chrome on the same host as the agent.
-3. Create and activate a virtual environment.
-4. Install `requirements.txt`.
-5. Copy `.env.example` to `.env` or export variables through the service manager. Never commit `.env`.
-6. Set `FLOW_PROJECT_ID` to a project created in the Flow UI.
-7. Load `extension/` as an unpacked Chrome MV3 extension.
-8. Open `https://flow.google.com/`, sign in, and keep the tab available.
-9. Start the agent with `python -m agent.main`.
-10. Start the dashboard with `npm install` and `npm run dev`, or serve its built static output behind the same local reverse proxy.
+1. Follow [SETUP.md](SETUP.md): Python 3.10+, ffmpeg/ffprobe, Chrome,
+   `pip install -r requirements.txt`, load `extension/`, sign in to Flow.
+2. Choose the data directory. By default it is the repository checkout
+   (`flow_agent.db`, `output/`, `backups/` next to the code). Set
+   `FLOW_AGENT_DIR` to an absolute path of an existing directory to move it.
+3. Configure environment variables in the process supervisor. **The agent
+   does not load `.env`**; if your supervisor can read an env file (systemd
+   `EnvironmentFile=`, NSSM `AppEnvironmentExtra`), use `.env.example` as the
+   template. At minimum set `FLOW_PROJECT_ID`.
+4. Keep the default ports. They are hard-coded in the extension.
 
-## Startup checks
+## Run
 
-The agent checks:
+Working directory must be the repository root:
 
-- Python/runtime imports during setup
-- FFmpeg and FFprobe availability
-- SQLite connectivity
-- writable media directory
-- Chrome extension/Flow status through `/api/flow/status`
+```bash
+/path/to/flowkit/venv/bin/python -m agent.main
+```
 
-`GET /health` is a liveness endpoint and can be healthy while the extension is disconnected.
+Windows:
 
-`GET /ready` is a generation-readiness endpoint. It returns HTTP 200 only when the database, media directory, FFmpeg, FFprobe, and extension connection are available. It returns HTTP 503 with per-check details otherwise.
+```powershell
+C:\path\to\flowkit\venv\Scripts\python.exe -m agent.main
+```
 
-## Graceful shutdown
+Supervisor options: systemd (Linux), launchd (macOS), NSSM or Task Scheduler
+(Windows). Configure restart-on-failure and start after user login, since
+Chrome must be running in that user's session. **Run exactly one agent per
+database**: the queue lock is in-process only.
 
-Send SIGTERM or stop the foreground process. The agent stops accepting worker work, drains active tasks, cancels tasks exceeding the drain timeout, closes the WebSocket server task, and closes the SQLite connection. Do not terminate the process forcibly during writes.
+### Dashboard
 
-## Production posture
+For development use `npm run dev` (see [DEVELOPMENT.md](DEVELOPMENT.md)).
+For a static build, `npm run build` produces `dashboard/dist/`; the agent does
+not serve it, so a reverse proxy must serve `dist/` and forward `/api`,
+`/health` and `/ws` (WebSocket upgrade) to `127.0.0.1:8100`. No proxy
+configuration ships with the repository.
 
-- Keep `API_HOST=127.0.0.1` and `WS_HOST=127.0.0.1` unless a protected reverse proxy and authentication layer are added.
-- Do not expose ports `8100` or `9222` publicly.
-- Keep Chrome, the extension, and the agent on the same trusted desktop session.
-- Store secrets in environment/OS secret storage, not source files.
-- Use the backup procedure in `docs/BACKUP_RECOVERY.md`.
-- Configure a process supervisor such as systemd, NSSM, or Windows Task Scheduler to restart the agent after host reboot. Avoid multiple agent instances sharing one database.
+## Startup behavior
+
+On start the agent:
+
+1. Runs `init_db()` — creates missing tables and applies in-place migrations.
+2. Loads custom materials from the database.
+3. Runs the readiness checks and logs `Startup dependency unavailable: <name>`
+   for each failing one. Startup continues regardless.
+4. Starts the extension WebSocket server, the worker (which first resets stale
+   `PROCESSING` requests), and — if `BACKUP_INTERVAL_SECONDS > 0` — the backup
+   scheduler.
+
+## Health checks
+
+| Endpoint | Status codes | Use |
+|---|---|---|
+| `GET /health` | always 200 | Liveness. `extension_connected` and `ws` show bridge state |
+| `GET /ready` | 200 ready / 503 not ready | Readiness: `ffmpeg`, `ffprobe`, `database`, `media_directory`, `extension` under `checks` |
+| `GET /api/flow/status` | 200 | Bridge detail: `connected`, `flow_tab_available`, `busy`, `flow_project_id`, `allow_degraded` |
+
+## Shutdown
+
+Stop with Ctrl+C or the supervisor's stop (SIGTERM on Unix). The worker stops
+claiming new requests, waits up to 30 s for in-flight requests, cancels the
+rest and returns them to `PENDING`, then closes the WebSocket server and the
+database. A forced kill leaves in-flight requests `PROCESSING`; they are reset
+on the next start once older than `STALE_PROCESSING_TIMEOUT`.
+
+## Security posture
+
+- The API has **no authentication** and allows CORS from any origin. Keep
+  `API_HOST=127.0.0.1` and `WS_HOST=127.0.0.1`; never expose ports 8100 or 9222.
+- Extension callbacks are authenticated with a per-process secret sent over
+  the local WebSocket.
+- `/ws/dashboard` accepts only `127.0.0.1`, `localhost` and
+  `chrome-extension://` origins.
+- Logs redact keys that look like secrets, but API keys passed as environment
+  variables are still visible to anything that can read the process
+  environment.
+- Keep secrets (`SUNO_API_KEY`, `ANTHROPIC_API_KEY`, YouTube OAuth files) out
+  of the repository; backups exclude them by name.
+
+## Backups
+
+Enable scheduled backups with `BACKUP_INTERVAL_SECONDS` or run
+`python -m scripts.backup create` from cron / Task Scheduler (working
+directory = repository root). See [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md).
+
+## Upgrading
+
+1. `python -m scripts.backup create`
+2. Stop the agent.
+3. `git pull`, then `pip install -r requirements.txt`.
+4. Reload the extension in `chrome://extensions` if `extension/` changed.
+5. `python setup.py sync` if you use generated skill commands.
+6. Start the agent; migrations run automatically. Check `/ready`.
+
+There are no down-migrations. To roll back, restore the backup taken in step 1
+with the previous code checked out.
 
 ## Troubleshooting
 
-### `/health` works but `/ready` returns 503
-
-Inspect the `checks` object from `/ready`:
-
-- `ffmpeg`/`ffprobe`: install FFmpeg and ensure both executables are on PATH.
-- `database`: verify `FLOW_AGENT_DIR` exists and is writable; stop duplicate agent processes.
-- `media_directory`: verify output permissions and available disk space.
-- `extension`: reload the MV3 extension, open a signed-in Flow tab, and check `/api/flow/status`.
-
-### Extension disconnected
-
-Confirm Chrome is running on the same host, the unpacked extension is enabled, the Flow tab is open, and port `9222` is free. The extension reconnects automatically after service-worker restart.
-
-### Flow tab unavailable
-
-Open `flow.google.com`, wait for the application to finish loading, and keep the tab from being discarded. The browser session cannot be replaced by a headless HTTP client.
-
-### Media failures
-
-Check disk space and FFmpeg/FFprobe versions. Generated media remains on disk for diagnosis; database lifecycle state determines whether an asset is considered current.
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

@@ -25,3 +25,6 @@ extension/_metadata/
 
 # oh-my-claudecode session state (plans, hud, logs) — tooling, not project content
 .omc/
+venv/
+.venv/
+*.bak

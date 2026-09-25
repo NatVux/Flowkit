@@ -38,17 +38,39 @@
 
 # FLOW KIT
 
-Standalone local system to generate AI videos via Google Flow. A Python FastAPI agent, SQLite database, background worker, local media pipeline, React dashboard, and Chrome MV3 extension work together. The extension runs batchexecute requests inside a real signed-in `flow.google.com` tab; this is not a headless browser integration.
+Standalone local system to generate AI videos via Google Flow. A Python FastAPI agent, SQLite database, background worker, local media helpers, React dashboard, and Chrome MV3 extension work together on one machine. The extension runs `batchexecute` requests inside a real signed-in `flow.google.com` tab; this is not a headless integration.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Components, repository layout, database, worker, request and scene lifecycles, media and YouTube pipelines |
+| [docs/SETUP.md](docs/SETUP.md) | Installation, configuration, Chrome extension, Flow connection |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Dev environment, dashboard, extension, conventions |
+| [docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md) | Running tests, CI, current baseline |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Running as a service, health checks, upgrades |
+| [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) | Backup, verify, restore, recovery scenarios |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common failures, logs, diagnosis |
+| [docs/REQUEST_LIFECYCLE.md](docs/REQUEST_LIFECYCLE.md) · [docs/SCENE_PIPELINE.md](docs/SCENE_PIPELINE.md) · [docs/CHARACTER_REFERENCES.md](docs/CHARACTER_REFERENCES.md) | Job and asset state machines |
+| [docs/EXTENSION_PROTOCOL.md](docs/EXTENSION_PROTOCOL.md) · [docs/IMAGE_API.md](docs/IMAGE_API.md) · [docs/OMNI_FLASH.md](docs/OMNI_FLASH.md) · [docs/CAPTURE.md](docs/CAPTURE.md) | Flow bridge and payload details |
+| [docs/YOUTUBE_PUBLISHING.md](docs/YOUTUBE_PUBLISHING.md) | YouTube status |
+| [docs/AI_CONTENT.md](docs/AI_CONTENT.md) | Optional Gemini planning: stories, scenes, prompts, narration, YouTube metadata |
 
 ## Current Implementation
 
-- Flow transport: batchexecute through the Chrome extension and signed-in Flow page.
-- Job states: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`.
-- Scene assets: image, video, optional upscale, narration audio, and final narration mix with dependency invalidation.
-- Character references: versioned immutable assets with scene snapshots.
-- YouTube: upload/publish state and idempotency adapter are implemented, but a concrete Google OAuth client is not bundled.
-- Backups: SQLite online backup plus media/config manifest verification; see [`docs/BACKUP_RECOVERY.md`](docs/BACKUP_RECOVERY.md).
-- Deployment: local-first; the interactive Chrome/Flow bridge must run outside a headless container.
+- Flow transport: `batchexecute` through the Chrome extension and a signed-in Flow page.
+- Job states: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, with persisted retry backoff and startup recovery of stale jobs.
+- Scene assets: image, video, optional upscale, narration audio and narration mix, with dependency invalidation.
+- Character references: versioned immutable assets with per-scene snapshots.
+- Backups: SQLite online backup plus media/config manifest verification.
+- Deployment: local-first; the Chrome/Flow bridge must run in an interactive browser session.
+- Optional AI planning: with `GEMINI_API_KEY` set, Gemini drafts stories, characters, scene prompts, narration and YouTube metadata, which are validated and then applied to the database. Flow still renders all media. See [docs/AI_CONTENT.md](docs/AI_CONTENT.md).
+
+### Known issues on `main`
+
+- **Backend YouTube publishing is not usable.** No YouTube client is wired in (endpoints return 503) and the `video` table lacks the publishing columns. The `/fk-youtube-upload` skill needs a `youtube/` directory that is not in this repository. See [docs/YOUTUBE_PUBLISHING.md](docs/YOUTUBE_PUBLISHING.md).
+- **Narration mixing** only works when a scene's video URL column holds a plain local file path.
+- 8 unit tests fail on any platform because of the YouTube schema gap and two out-of-date test fixtures. See [docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md#current-baseline).
 
 ## Showcase
 
@@ -169,12 +191,12 @@ A local React dashboard (`dashboard/`) for monitoring and driving the pipeline �
 ```
 ┌──────────────────┐     WebSocket      ┌──────────────────────┐     ┌──────────────────┐
 │  Python Agent    │◄──────────────────►│  Chrome Extension     │────►│  flow.google.com │
-│  (FastAPI+SQLite)│    localhost:9222  │  (MV3 Service Worker) │     │  (signed-in tab) │
+│  (FastAPI+SQLite)│    127.0.0.1:9222  │  (MV3 Service Worker) │     │  (signed-in tab) │
 │                  │                    │                       │     │                  │
-│  - REST API :8100│  ── envelopes ──►  │  - reCAPTCHA mint     │     │  batchexecute    │
-│  - Queue worker  │  ◄── responses ──  │  - runs the RPC in    │     │  cookie + `at`   │
-│  - Post-process  │                    │    the page's world   │     │                  │
-│  - SQLite DB     │                    │                       │     │                  │
+│  - REST API :8100│  ── commands ───►  │  - reCAPTCHA mint     │     │  batchexecute    │
+│  - Queue worker  │  ◄── callback ───  │  - runs the RPC in    │     │  cookie + `at`   │
+│  - Media helpers │  POST /api/ext/    │    the page's world   │     │                  │
+│  - SQLite DB     │       callback     │                       │     │                  │
 └──────────────────┘                    └──────────────────────┘     └──────────────────┘
 ```
 
@@ -183,72 +205,72 @@ generate also carries a single-use reCAPTCHA. None of that can be replayed from
 outside the browser, so the agent builds the request and the **page** issues it.
 One signed-in Flow tab has to stay open; nothing here works headless.
 
-> **September 2026 — Flow moved.** It now lives at `flow.google.com` and the old
-> `aisandbox-pa.googleapis.com` REST API has no caller: the `Bearer ya29.…` it
-> needed stopped being minted. If you are upgrading from an older Flow Kit,
-> reload the extension (v0.3.2+) and pin `FLOW_PROJECT_ID` — see
-> [Configuration](#configuration). The REST path has been removed; `git log`
-> has it if a payload is ever needed for reference.
+Full design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Quick Start
 
-### One-command setup
+Full instructions, including Windows: [docs/SETUP.md](docs/SETUP.md).
+
+### Install
 
 ```bash
-./setup.sh
+./setup.sh          # macOS / Linux / WSL: checks Python 3.10+, pip, ffmpeg, ffprobe, Chrome; creates venv/; installs deps
 ```
 
-This checks and installs: Python 3.10+, pip, ffmpeg, ffprobe, Chrome, creates venv, installs dependencies, verifies imports.
-
-> **Windows:** Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`) or Git Bash. All bash scripts and commands assume a Unix shell.
-
-### Manual setup
+or manually:
 
 ```bash
-# Prerequisites: Python 3.10+, ffmpeg, Chrome
-pip install -r requirements.txt
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt       # plus ffmpeg/ffprobe on PATH
 ```
 
 ### Run
 
 ```bash
-# 1. Load Chrome extension: chrome://extensions → Developer mode → Load unpacked → extension/
+# 1. Load the extension: chrome://extensions → Developer mode → Load unpacked → extension/
 # 2. Open https://flow.google.com/ and sign in — leave the tab open
 # 3. Create a project in the Flow UI and copy its uuid out of the URL
-export FLOW_PROJECT_ID=<that uuid>
+export FLOW_PROJECT_ID=<that uuid>    # the agent reads env vars only; .env files are not loaded
 
-# 4. Start agent
-source venv/bin/activate   # if using setup.sh
+# 4. Start the agent from the repository root
 python -m agent.main
 
 # 5. Verify
 curl http://127.0.0.1:8100/health
-# {"status":"ok","extension_connected":true}
+# {"status":"ok","version":"1.3.1","extension_connected":true,"ws":{…}}
 curl http://127.0.0.1:8100/ready
-# HTTP 200 only when SQLite, media storage, FFmpeg, FFprobe, and the extension are ready
+# HTTP 200 only when SQLite, the media directory, ffmpeg, ffprobe and the extension are ready; 503 lists what is missing
 curl http://127.0.0.1:8100/api/flow/status
-# {"connected":true,"transport":"batch","flow_project_id":"…","flow_key_present":false}
+# {"connected":true,…,"transport":"batch","flow_project_id":"…","allow_degraded":false,"flow_key_present":false}
 ```
 
 `flow_key_present: false` is expected — the current transport has no bearer
 token. Step 3 is not optional: Flow's project-creation endpoint went with the
 migration, so without a pinned project every request fails `NO_FLOW_PROJECT`.
-You can also pass `flow_project_id` per project on `POST /api/projects`.
+
+Flow Kit uses the Flow project uuid as its own project id, so **each Flow Kit
+project needs its own Flow project**: pass `flow_project_id` on
+`POST /api/projects` for every project after the first.
+
+Optional dashboard: `cd dashboard && npm install && npm run dev` →
+http://localhost:5173.
 
 ### Configuration
 
+The most important variables (full list in [docs/SETUP.md](docs/SETUP.md#configuration)):
+
 | Env var | Default | What it does |
 |---------|---------|--------------|
-| `FLOW_PROJECT_ID` | — | The Flow project every RPC is scoped to. Required. |
-| `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
-| `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
-| `BACKUP_INTERVAL_SECONDS` | `0` | Optional in-process backup interval; `0` disables it. |
-| `LOG_LEVEL` | `INFO` | Backend log level. |
+| `FLOW_PROJECT_ID` | — | The Flow project RPCs are scoped to. Required unless each project passes `flow_project_id` |
+| `FLOW_ALLOW_DEGRADED` | `0` | `1` lets Veo chaining and r2v fall back to plain i2v instead of failing |
+| `MAX_CONCURRENT_REQUESTS` | `5` | Parallel Flow operations |
+| `API_COOLDOWN` | `10` | Minimum seconds between operation starts |
+| `MAX_RETRIES` | `5` | Counted failures before a request is `FAILED` |
+| `BACKUP_INTERVAL_SECONDS` | `0` | In-process backup interval; `0` disables |
+| `LOG_LEVEL` | `INFO` | Backend log level (logs go to stderr) |
 
-For production deployment, see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and
-[`docs/BACKUP_RECOVERY.md`](docs/BACKUP_RECOVERY.md). The Chrome/Flow bridge
-requires a real interactive signed-in browser session and is not a headless
-container workload.
+`API_PORT` (8100) and `WS_PORT` (9222) exist but are hard-coded in the
+extension; changing them breaks the bridge.
 
 ### Image API
 
@@ -265,11 +287,11 @@ Three capabilities have no captured payload, so they fail with
 
 | Capability | Status | Workaround |
 |---|---|---|
-| 4K/1080p upscale (`/fk-pipeline` last step) | unported | none — keep the 1080p render |
+| Veo video upscale (`UPSCALE_VIDEO`) | unported | none — keep the original render |
 | Veo reference-to-video (r2v) | unported | Omni r2v (`model_family=omni_flash`), or `FLOW_ALLOW_DEGRADED=1` → i2v off the first reference |
 | Veo start+end-frame chaining (`/fk-gen-chain-videos`) | unported | Omni first+last (`model_family=omni_flash`), or `FLOW_ALLOW_DEGRADED=1` → i2v off the start frame |
 | Omni Flash text-to-video | ported | `POST /api/flow/generate-video-omni-text` (4/6/8/10s) |
-| Omni Flash frame / first+last / reference modes | ported | `eb1hJf`, `nprQif`, `MZZa6b` — `POST /api/flow/generate-video` with `model_family=omni_flash` |
+| Omni Flash frame / first+last / reference modes | ported | `POST /api/flow/generate-video` with `model_family=omni_flash` |
 
 Restoring one starts with a capture, not a guess: [`docs/CAPTURE.md`](docs/CAPTURE.md).
 
@@ -279,35 +301,23 @@ A chubby cat sells fish at a market. 3 scenes, vertical, Pixar 3D style.
 
 ### How it works (read this first)
 
-The system uses **reference images** to keep visuals consistent across scenes. Here's the mental model:
+The system uses **reference images** to keep visuals consistent across scenes:
 
 **1. Identify every visual element** that should look the same across scenes:
-- Characters → `entity_type: "character"` (portrait reference)
-- Places → `entity_type: "location"` (landscape reference)
-- Important objects → `entity_type: "visual_asset"` (detail reference)
+- Characters → `entity_type: "character"`
+- Places → `entity_type: "location"`
+- Important objects → `entity_type: "visual_asset"`
 
-**2. Describe ONLY appearance** in the entity `description` — this generates the reference image:
-- `"Chubby orange tabby cat with blue apron, straw hat"` (what it looks like)
+**2. Describe ONLY appearance** in the entity `description` — this generates the reference image.
 
-**3. Write scene prompts as ACTION** — reference entities by name, describe what they DO:
-- `"Pippip stands behind Fish Stall, arranging fish..."` (what happens)
-- NOT: `"A chubby orange tabby cat wearing a blue apron stands behind a wooden stall..."` (don't repeat appearance)
+**3. Write scene prompts as ACTION** — reference entities by name, describe what they DO.
 
-**4. List all entities that appear** in each scene's `character_names` array — their reference images get passed to the AI as visual input, ensuring consistency.
+**4. List all entities that appear** in each scene's `character_names` array — their reference images are passed to Flow as visual input.
 
-```
-Story idea
-    ↓
-Break into visual elements → characters[] array with entity_type + description
-    ↓
-Write scene prompts using entity NAMES → character_names lists which refs to use
-    ↓
-System generates ref image per entity → then composes scenes using those refs
-```
 
 ### Using Skills (recommended)
 
-Skills handle all the API calls, polling, and verification automatically. Use with Claude Code (`/fk-command`) or follow the recipe in `skills/*.md` for any AI agent.
+Skills handle the API calls, polling and verification. Use with Claude Code (`/fk-command`) or follow the recipe in `skills/*.md` for any AI agent.
 
 ```
 /fk-create-project             ← interactive: asks story, creates entities + scenes
@@ -318,8 +328,6 @@ Skills handle all the API calls, polling, and verification automatically. Use wi
 /fk-status <pid>               ← dashboard: what's done, what's next
 ```
 
-Full pipeline in 5 commands. Each skill pre-checks dependencies (e.g. `/fk-gen-images` verifies all refs exist first).
-
 ### Manual API (step by step)
 
 <details>
@@ -327,94 +335,73 @@ Full pipeline in 5 commands. Each skill pre-checks dependencies (e.g. `/fk-gen-i
 
 #### Step 1: Create project with reference entities
 
-From the story, identify every visual element that repeats across scenes:
-
-| Element | entity_type | description (appearance only) |
-|---------|-------------|-------------------------------|
-| Pippip | `character` | Chubby orange tabby cat, big green eyes, blue apron, straw hat |
-| Fish Stall | `location` | Rustic wooden stall, thatched roof, ice display |
-| Open Market | `location` | Southeast Asian market, colorful awnings, lanterns |
-| Golden Fish | `visual_asset` | Golden koi, shimmering scales, magical glow |
-
 ```bash
 curl -X POST http://127.0.0.1:8100/api/projects \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Pippip the Fish Merchant",
-    "story": "Pippip is a chubby orange tabby cat who sells fish at a Southeast Asian open market. Scene 1: Morning setup. Scene 2: Staring at the golden fish. Scene 3: Eating the last fish at sunset.",
+    "material": "3d_pixar",
+    "story": "Pippip is a chubby orange tabby cat who sells fish at a Southeast Asian open market.",
     "characters": [
-      {"name": "Pippip", "entity_type": "character", "description": "Chubby orange tabby cat with big green eyes, blue apron, straw hat. Walks upright. Pixar-style 3D."},
-      {"name": "Fish Stall", "entity_type": "location", "description": "Small rustic wooden market stall with thatched bamboo roof, crushed ice display, hanging brass scale."},
-      {"name": "Open Market", "entity_type": "location", "description": "Bustling Southeast Asian open-air market with colorful awnings, hanging lanterns, stone walkway."},
-      {"name": "Golden Fish", "entity_type": "visual_asset", "description": "Magnificent golden koi fish with shimmering iridescent scales, elegant fins, slight magical glow."}
+      {"name": "Pippip", "entity_type": "character", "description": "Chubby orange tabby cat with big green eyes, blue apron, straw hat. Walks upright."},
+      {"name": "Fish Stall", "entity_type": "location", "description": "Small rustic wooden market stall with thatched bamboo roof, crushed ice display."},
+      {"name": "Open Market", "entity_type": "location", "description": "Bustling Southeast Asian open-air market with colorful awnings, hanging lanterns."},
+      {"name": "Golden Fish", "entity_type": "visual_asset", "description": "Golden koi fish with shimmering iridescent scales, slight magical glow."}
     ]
   }'
-# Save project_id from response
+# Requires the extension to be connected. Uses FLOW_PROJECT_ID unless "flow_project_id" is given.
+# The response "id" is <PID>. Character ids: GET /api/projects/<PID>/characters
 ```
 
 #### Step 2: Create video + scenes
 
-Scene prompts reference entities by **name** (not description). `character_names` lists which reference images to apply.
-
 ```bash
-# Create video
 curl -X POST http://127.0.0.1:8100/api/videos \
   -H "Content-Type: application/json" \
   -d '{"project_id": "<PID>", "title": "Pippip Episode 1"}'
 
-# Scene 1 (ROOT) — Pippip + Fish Stall + Open Market appear
 curl -X POST http://127.0.0.1:8100/api/scenes \
   -H "Content-Type: application/json" \
   -d '{
     "video_id": "<VID>", "display_order": 0,
-    "prompt": "Pippip stands behind Fish Stall, arranging fresh fish on ice. Sunrise, golden light in Open Market. Pixar 3D.",
+    "prompt": "Pippip stands behind Fish Stall, arranging fresh fish on ice. Sunrise in Open Market.",
     "character_names": ["Pippip", "Fish Stall", "Open Market"],
     "chain_type": "ROOT"
   }'
 
-# Scene 2 (CONTINUATION) — Golden Fish now appears
 curl -X POST http://127.0.0.1:8100/api/scenes \
   -H "Content-Type: application/json" \
   -d '{
     "video_id": "<VID>", "display_order": 1,
-    "prompt": "Pippip leans over Fish Stall, staring at Golden Fish on empty ice. Drooling. Open Market dark behind. Pixar 3D.",
+    "prompt": "Pippip leans over Fish Stall, staring at Golden Fish on empty ice.",
     "character_names": ["Pippip", "Fish Stall", "Golden Fish", "Open Market"],
     "chain_type": "CONTINUATION", "parent_scene_id": "<scene-1-id>"
   }'
-
-# Scene 3 (CONTINUATION)
-curl -X POST http://127.0.0.1:8100/api/scenes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_id": "<VID>", "display_order": 2,
-    "prompt": "Pippip sits on stool at Fish Stall eating Golden Fish with chopsticks. SOLD OUT sign. Open Market sunset. Pixar 3D.",
-    "character_names": ["Pippip", "Fish Stall", "Golden Fish", "Open Market"],
-    "chain_type": "CONTINUATION", "parent_scene_id": "<scene-2-id>"
-  }'
 ```
 
-#### Step 3-6: Generate refs → images → videos → concat
+#### Step 3-5: Queue refs → images → videos
 
 ```bash
-# Step 3: Generate reference images (one per entity, wait for each)
-curl -X POST http://127.0.0.1:8100/api/requests \
-  -d '{"type": "GENERATE_CHARACTER_IMAGE", "character_id": "<CID>", "project_id": "<PID>"}'
-# Poll: GET /api/requests/<RID> until status=COMPLETED
-# Repeat for each entity. Verify all have UUID media_id.
+curl -X POST http://127.0.0.1:8100/api/requests/batch \
+  -H "Content-Type: application/json" \
+  -d '{"requests": [
+    {"type": "GENERATE_CHARACTER_IMAGE", "character_id": "<CID1>", "project_id": "<PID>"},
+    {"type": "GENERATE_CHARACTER_IMAGE", "character_id": "<CID2>", "project_id": "<PID>"}
+  ]}'
 
-# Step 4: Generate scene images
-curl -X POST http://127.0.0.1:8100/api/requests \
-  -d '{"type": "GENERATE_IMAGE", "scene_id": "<SID>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "VERTICAL"}'
-# Worker blocks if any ref is missing media_id
+curl -X POST http://127.0.0.1:8100/api/requests/batch \
+  -H "Content-Type: application/json" \
+  -d '{"requests": [
+    {"type": "GENERATE_IMAGE", "scene_id": "<SID1>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "VERTICAL"},
+    {"type": "GENERATE_VIDEO", "scene_id": "<SID1>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "VERTICAL"}
+  ]}'
+# Video requests wait (without using retries) until the scene image exists.
 
-# Step 5: Generate videos (2-5 min each)
-curl -X POST http://127.0.0.1:8100/api/requests \
-  -d '{"type": "GENERATE_VIDEO", "scene_id": "<SID>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "VERTICAL"}'
-
-# Step 6: Download + concat
-curl -s "http://127.0.0.1:8100/api/scenes?video_id=<VID>"  # get video URLs
-# Download each, normalize with ffmpeg, concat
+curl -s "http://127.0.0.1:8100/api/requests/batch-status?video_id=<VID>"
+curl -s "http://127.0.0.1:8100/api/scenes?video_id=<VID>"   # image/video URLs
 ```
+
+Downloading and concatenating the clips is done with ffmpeg (the `/fk-concat` skill); there is no concat endpoint.
 
 </details>
 
@@ -424,18 +411,9 @@ curl -s "http://127.0.0.1:8100/api/scenes?video_id=<VID>"  # get video URLs
 
 ### Reference Image System
 
-Every visual element that should stay consistent gets a **reference image** — characters, locations, props. Each reference has a UUID `media_id` used in all scene generations via `imageInputs`.
-
-| Entity Type | Aspect Ratio | Composition |
-|-------------|-------------|-------------|
-| `character` | Portrait | Full body head-to-toe, front-facing, centered |
-| `location` | Landscape | Establishing shot, level horizon, atmospheric |
-| `creature` | Portrait | Full body, natural stance, distinctive features |
-| `visual_asset` | Portrait | Detailed view, textures, scale reference |
+Every visual element that should stay consistent gets a **reference image** — characters, locations, props. Each reference has a UUID `media_id` that is passed to scene generations. Regenerating a reference creates a new version and resets every scene that uses it.
 
 ### Scene Prompts = Action Only
-
-Scene prompts describe **what happens**, not character appearance. The reference images maintain visual consistency.
 
 ```
 DO:   "Pippip juggling fish at Fish Stall, crowd watching in Open Market"
@@ -448,44 +426,38 @@ All `media_id` values are UUID format (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). 
 
 ### Two Prompts per Scene
 
-Each scene has **two separate prompts**:
-- `prompt` — describes the **still image** (frame 0): `"Luna steps out of rocket onto candy planet. Wide shot, sunrise."`
-- `video_prompt` — describes the **8s video motion** with sub-clip timing and camera directions:
+- `prompt` (or `image_prompt`) — the **still image** (frame 0).
+- `video_prompt` — the **motion**, typically with sub-clip timing and camera directions:
 
 ```
 0-3s: Wide crane down, Luna steps out of rocket onto Candy Planet Surface. Luna gasps "It's beautiful!"
-3-6s: Low angle tracking shot, Luna walks across candy ground, shallow DOF. Luna says "Everything is made of candy."
-6-8s: Close-up Luna's face, eyes wide with wonder, golden hour backlight. Silence, ambient wind.
+3-6s: Low angle tracking shot, Luna walks across candy ground, shallow DOF.
+6-8s: Close-up Luna's face, eyes wide with wonder, golden hour backlight.
 ```
 
-### Character Voice
+### Automatic prompt additions
 
-Characters can have a `voice_description` (max ~30 words) for voice consistency:
-```json
-{"name": "Luna", "entity_type": "character", "description": "Small white cat...", "voice_description": "Soft curious childlike voice with wonder and slight purring"}
-```
+Before a video is generated the agent appends:
 
-Voice descriptions are auto-appended to video prompts before generation.
-
-### No Background Music
-
-The worker auto-appends `"No background music. Keep only natural sound effects and ambient sounds."` to all video prompts. Sound effects from the scene (footsteps, splashing, wind) are preserved.
+- `Character voices: …` from each scene character's `voice_description` when the prompt contains dialogue;
+- an `Audio: … no background music …` line, unless the project has `allow_music` or the prompt already has an `Audio:`/`Music:` label;
+- a `Negative: subtitles, captions, watermark, …` line unless one is present.
 
 ## Pipeline Overview
 
 ```
-1. Create project      POST /api/projects (with entities + story)
+1. Create project      POST /api/projects (entities + story + material)
 2. Create video        POST /api/videos
 3. Create scenes       POST /api/scenes (chain_type: ROOT → CONTINUATION)
-4. Gen ref images      POST /api/requests {type: GENERATE_CHARACTER_IMAGE} per entity
-   → Wait ALL complete, verify all have UUID media_id
-5. Gen scene images    POST /api/requests {type: GENERATE_IMAGE} per scene
-   → Wait ALL complete
-6. Gen videos          POST /api/requests {type: GENERATE_VIDEO} per scene
-   → Wait ALL complete (2-5 min each)
-7. (Optional) Upscale  POST /api/requests {type: UPSCALE_VIDEO} (TIER_TWO only)
-8. Download + concat   ffmpeg normalize + concat
+4. Gen ref images      POST /api/requests/batch {type: GENERATE_CHARACTER_IMAGE}
+5. Gen scene images    POST /api/requests/batch {type: GENERATE_IMAGE}
+6. Gen videos          POST /api/requests/batch {type: GENERATE_VIDEO}   (2-5 min each)
+7. (Upscale)           UPSCALE_VIDEO — unported on the Veo path
+8. Narration           PATCH narrator_text, POST /api/videos/{vid}/narrate
+9. Download + concat   ffmpeg via /fk-concat or /fk-concat-fit-narrator
 ```
+
+Lifecycle details: [docs/SCENE_PIPELINE.md](docs/SCENE_PIPELINE.md), [docs/REQUEST_LIFECYCLE.md](docs/REQUEST_LIFECYCLE.md).
 
 ## Skills (AI Agent Workflows)
 
@@ -499,7 +471,7 @@ Ready-to-use workflow recipes in `skills/` (also available as `/slash-commands` 
 | `/fk-research` | Fact-check story details before scripting |
 | `/fk-gen-refs` | Generate reference images for all entities |
 | `/fk-gen-images` | Generate scene images with character refs |
-| `/fk-gen-videos` | Generate videos from scene images (4K upscale via `UPSCALE_VIDEO` request, `PAYGATE_TIER_TWO`) |
+| `/fk-gen-videos` | Generate videos from scene images (Veo video upscale is currently unported — see [What does not work yet](#what-does-not-work-on-the-new-api-yet)) |
 | `/fk-concat` | Download + merge all scene videos |
 | `/fk-pipeline` | Smart full-pipeline orchestrator — runs the whole chain end to end |
 | `/fk-monitor` | Live monitor for a running pipeline |
@@ -508,7 +480,7 @@ Ready-to-use workflow recipes in `skills/` (also available as `/slash-commands` 
 
 | Skill | Description |
 |-------|-------------|
-| `/fk-gen-chain-videos` | Auto start+end frame chaining for smooth transitions (i2v_fl) |
+| `/fk-gen-chain-videos` | Start+end frame chaining for smooth transitions (Veo path unported; use Omni Flash or `FLOW_ALLOW_DEGRADED=1`) |
 | `/fk-insert-scene` | Multi-angle shots, cutaways, close-ups within a chain |
 | `/fk-creative-mix` | Analyze story + suggest all techniques (chain, insert, r2v, parallel) |
 
@@ -638,14 +610,19 @@ drawtext` shows whether yours has it.
 
 ## Video Generation Techniques
 
-| Technique | API Type | Use Case |
-|-----------|----------|----------|
-| **i2v** | `GENERATE_VIDEO` | Image → video (standard) |
-| **i2v_fl** | `GENERATE_VIDEO` + endImage | Start+end frame → smooth scene transitions |
-| **r2v** | `GENERATE_VIDEO_REFS` | Reference images → video (intros, dream sequences) |
-| **Upscale** | `UPSCALE_VIDEO` | Video → 4K (TIER_TWO only) |
+| Technique | API Type | Status |
+|-----------|----------|--------|
+| **i2v** | `GENERATE_VIDEO` | Works |
+| **i2v_fl** (start+end frame) | `GENERATE_VIDEO` on a chained scene | Veo unported; Omni first+last works |
+| **r2v** | `GENERATE_VIDEO_REFS` | Veo unported; Omni reference mode works |
+| **Omni text-to-video** | `POST /api/flow/generate-video-omni-text` | Works |
+| **Upscale** | `UPSCALE_VIDEO` | Veo unported, no fallback |
 
 ## API Reference
+
+Interactive OpenAPI docs: http://127.0.0.1:8100/docs. Errors are returned as
+`{"error": {"code", "message", "details"}}`. Full route list:
+[ARCHITECTURE.md §9](ARCHITECTURE.md#9-rest-api-surface).
 
 ### CRUD Endpoints
 
@@ -655,270 +632,108 @@ drawtext` shows whether yours has it.
 | Character | `POST /api/characters` | `GET /api/characters` | `GET /api/characters/{id}` | `PATCH /api/characters/{id}` | `DELETE /api/characters/{id}` |
 | Video | `POST /api/videos` | `GET /api/videos?project_id=` | `GET /api/videos/{id}` | `PATCH /api/videos/{id}` | `DELETE /api/videos/{id}` |
 | Scene | `POST /api/scenes` | `GET /api/scenes?video_id=` | `GET /api/scenes/{id}` | `PATCH /api/scenes/{id}` | `DELETE /api/scenes/{id}` |
-| Request | `POST /api/requests` | `GET /api/requests` | `GET /api/requests/{id}` | `PATCH /api/requests/{id}` | — |
+| Request | `POST /api/requests`, `POST /api/requests/batch` | `GET /api/requests` | `GET /api/requests/{id}` | `PATCH /api/requests/{id}` | — |
 
 ### Special Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Server + extension status |
-| `GET /api/flow/status` | Extension connection details |
-| `GET /api/flow/credits` | User credits + tier |
-| `GET /api/requests/pending` | Pending request queue |
-| `GET /api/projects/{id}/characters` | Entities linked to project |
+| `GET /health` | Liveness + extension connection stats |
+| `GET /ready` | Readiness (200/503) for ffmpeg, ffprobe, database, media directory, extension |
+| `GET /api/flow/status` | Bridge details, pinned Flow project |
+| `GET /api/flow/credits` | Flow credits + tier |
+| `POST /api/flow/upload-image` | Upload a local image to get a `media_id` |
+| `POST /api/flow/refresh-urls/{project_id}` | Refresh expired signed URLs |
+| `GET /api/requests/pending` | Pending queue |
+| `GET /api/requests/batch-status` | Aggregate counts for `video_id` / `project_id` / `type` / `orientation` |
+| `GET /api/projects/{id}/characters` | Entities linked to a project |
+| `GET /api/projects/{id}/output-dir` | Create/return `output/<slug>/` layout |
+| `POST /api/videos/{id}/narrate` | TTS narration (+ optional mix) |
+| `POST /api/videos/{id}/review` | AI video review |
+| `GET/PATCH /api/models` | Model keys |
+| `GET/PATCH /api/providers` | Review CLI provider config |
+| `GET/PUT/DELETE /api/active-project` | Active project for skills/statusline |
 
 ### Request Types
 
-| Type | Required Fields | Async? | reCAPTCHA? |
-|------|----------------|--------|------------|
-| `GENERATE_CHARACTER_IMAGE` | character_id, project_id | No | Yes |
-| `GENERATE_IMAGE` | scene_id, project_id, video_id, orientation | No | Yes |
-| `GENERATE_VIDEO` | scene_id, project_id, video_id, orientation | Yes | Yes |
-| `GENERATE_VIDEO_REFS` | scene_id, project_id, video_id, orientation | Yes | Yes |
-| `UPSCALE_VIDEO` | scene_id, project_id, video_id, orientation | Yes | Yes |
+| Type | Required Fields |
+|------|----------------|
+| `GENERATE_CHARACTER_IMAGE`, `REGENERATE_CHARACTER_IMAGE`, `EDIT_CHARACTER_IMAGE` | `character_id`, `project_id` |
+| `GENERATE_IMAGE`, `REGENERATE_IMAGE`, `EDIT_IMAGE` | `scene_id`, `project_id`, `video_id` (`orientation` optional: falls back to the video's, then `VERTICAL`) |
+| `GENERATE_VIDEO`, `REGENERATE_VIDEO`, `GENERATE_VIDEO_REFS` | `scene_id`, `project_id`, `video_id` (`orientation` optional: falls back to the video's, then `VERTICAL`) |
+| `UPSCALE_VIDEO` | `scene_id`, `project_id`, `video_id` (`orientation` optional: falls back to the video's, then `VERTICAL`) |
 
 ## Worker Behavior
 
-- **Server handles throttling** — worker enforces max 5 concurrent + 10s cooldown automatically. Use `POST /api/requests/batch` to submit all at once; do NOT manually batch.
-- **10s cooldown** between API calls (anti-spam, configurable via `API_COOLDOWN`)
-- **Reference blocking** — scene image gen refuses if any referenced entity is missing `media_id`
-- **Skip completed** — won't re-generate already-completed assets
-- **Cascade clear** — regenerating image auto-resets downstream video + upscale
-- **Retry** — failed requests retry up to 5 times
-- **UUID enforcement** — extracts UUID from fifeUrl if response doesn't provide it directly
-- **Voice context** — auto-appends character `voice_description` to video prompts
-- **No background music** — auto-appends "no background music, keep sound effects" to all video prompts
-- **Dual video response schema** — Lite/Fast/Ultra models return `operations[]` and stream URLs; Low Priority models (`veo_3_1_*_low_priority`, `*_ultra_relaxed`) return `workflows + media` with the MP4 inline as base64. The SDK auto-detects, validates the `ftyp` magic, and saves the binary to `output/_workflow_videos/{media_id}.mp4`. The scene's `_video_url` is then a `file://` path which `curl` and `ffmpeg` handle natively. `_video_media_id` always stores the real Flow media UUID, so upscale works for both schemas.
+- **Server-side throttling** — at most `MAX_CONCURRENT_REQUESTS` (5) in flight and `API_COOLDOWN` (10 s) between starts. Submit everything with `POST /api/requests/batch`; do not script your own loops.
+- **FIFO claims** — pending requests are claimed oldest first; nothing is claimed while the extension is disconnected.
+- **Prerequisite deferral** — video waits for the scene image, upscale for the video; deferral does not use up retries.
+- **Reference check** — a scene image fails with `Waiting for reference images: …` while any named entity lacks a `media_id`.
+- **Skip completed** — `GENERATE_*` / `UPSCALE_VIDEO` for an already-completed asset finish without calling Flow. Use `REGENERATE_*` to force.
+- **Cascade clear** — new image resets video + upscale; new video resets upscale; new character reference resets every scene that uses it.
+- **Retry** — `min(2^n × 10 s, 300 s)` backoff plus jitter; `FAILED` after `MAX_RETRIES` (5) counted failures. Configuration errors (`NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, …) fail immediately; extension disconnects are retried without counting; reCAPTCHA failures get up to 10 attempts.
+- **Expired media** — `not found` errors on video/upscale trigger a re-upload of the scene image and a retry.
+- **Stale recovery** — at startup, `PROCESSING` requests older than 10 min return to `PENDING`.
+
+Full rules: [ARCHITECTURE.md §6–7](ARCHITECTURE.md#6-worker).
 
 ### Default Model & Tier Compatibility
 
-The default for `PAYGATE_TIER_TWO` `frame_2_video` and `start_end_frame_2_video` is `veo_3_1_i2v_lite_low_priority` — the TRUE 0-credit Low Priority that works on every service tier including `SERVICE_TIER_ADVANCED`.
-
-The `*_ultra_relaxed` family (Low Priority ultra-quality) silently returns empty operations on `SERVICE_TIER_ADVANCED` accounts because Google requires `SERVICE_TIER_ULTRA` for that path. ULTRA-tier users can switch back via `/fk-change-model` — see `skills/fk-change-model.md` for the full preset list and tier compatibility matrix.
+The default for `PAYGATE_TIER_TWO` `frame_2_video` and `start_end_frame_2_video` in `agent/models.json` is `veo_3_1_i2v_lite_low_priority`. The `*_ultra_relaxed` family silently returns empty operations on `SERVICE_TIER_ADVANCED` accounts because Google requires `SERVICE_TIER_ULTRA` for that path. Switch models with `/fk-change-model` or `PATCH /api/models`; see `skills/fk-change-model.md`.
 
 ## Material System
 
-Every project must have a `material` field that controls the visual style of generated images. Set it at project creation.
+A project's `material` (default `realistic`) controls the visual style of generated images.
 
 ```bash
-# List available materials
-curl -s http://127.0.0.1:8100/api/materials
-
-# Set on project
-curl -X POST http://127.0.0.1:8100/api/projects \
-  -d '{"name": "...", "material": "3d_pixar", ...}'
+curl -s http://127.0.0.1:8100/api/materials          # list
 ```
 
-Materials control both entity `image_prompt` style and scene `scene_prefix`. Examples: `realistic`, `3d_pixar`, `anime`, `stop_motion`, `minecraft`, `oil_painting`.
-
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_HOST` | `127.0.0.1` | REST API bind address |
-| `API_PORT` | `8100` | REST API port |
-| `WS_HOST` | `127.0.0.1` | WebSocket server bind |
-| `WS_PORT` | `9222` | WebSocket server port |
-| `POLL_INTERVAL` | `5` | Worker poll interval (seconds) |
-| `MAX_RETRIES` | `5` | Max retries per request |
-| `VIDEO_POLL_TIMEOUT` | `420` | Video gen poll timeout (seconds) |
-| `API_COOLDOWN` | `10` | Seconds between API calls (anti-spam) |
-
-## Architecture
-
-```
-agent/
-├── main.py              # FastAPI app + WebSocket server
-├── config.py            # Configuration (loads models.json, providers.json)
-├── models.json          # Video/upscale/image model mappings
-├── providers.json        # Per-role AI CLI provider/model/effort (claude/agy/codex)
-├── db/
-│   ├── schema.py        # SQLite schema (aiosqlite)
-│   └── crud.py          # Async CRUD with column whitelisting
-├── models/              # Pydantic models + Literal enums
-├── api/                 # REST routes (projects, videos, scenes, characters, requests,
-│                         #   flow, models, providers, reviews, materials, music, tts)
-├── services/
-│   ├── flow_client.py   # WS bridge to extension
-│   ├── tts.py           # OmniVoice TTS (subprocess-based)
-│   ├── scene_chain.py   # Continuation scene logic
-│   ├── cli_providers.py  # What each AI CLI accepts; role → provider/model/effort
-│   ├── video_reviewer.py # AI vision review — contact sheet + claude/agy/codex CLI dispatch
-│   └── post_process.py  # ffmpeg trim/merge/music
-└── worker/
-    └── processor.py     # Queue processor + poller
-
-extension/               # Chrome MV3 extension
-skills/                  # AI agent workflow recipes (CLI-agnostic)
-youtube/
-├── auth.py              # OAuth2 multi-channel auth
-├── upload.py            # Upload with scheduling + rule validation
-└── channels/            # Per-channel config (gitignored)
-    └── <channel_name>/
-        ├── client_secrets.json  # OAuth2 credentials
-        ├── token.json           # Auth token (auto-created)
-        ├── channel_rules.json   # Upload rules + SEO defaults
-        └── upload_history.json  # Upload log
-CLAUDE.md                # AI agent instructions (Claude Code)
-AGENTS.md                # AI agent instructions (Codex CLI, generated)
-```
+Built-in ids include `realistic`, `3d_pixar`, `anime`, `stop_motion`, `minecraft`, `oil_painting`, `ghibli`, `watercolor`, `comic_book`, `cyberpunk`, `claymation`, `lego`. Custom materials: `POST /api/materials`.
 
 ## TTS Narration (OmniVoice)
 
-Optional narrator voice for scenes. Uses [OmniVoice](https://github.com/tuannguyenhoangit-droid/OmniVoice) — multilingual zero-shot TTS with voice cloning (600+ languages).
-
-### Setup
-
-See `skills/fk-gen-tts-template.md` for full install guide. Quick version:
+Optional narrator voice for scenes via [OmniVoice](https://github.com/tuannguyenhoangit-droid/OmniVoice), run in a separate Python interpreter.
 
 ```bash
 pip install torch==2.8.0 torchaudio==2.8.0   # or +cu128 for NVIDIA
 pip install omnivoice
 python3 -c "from omnivoice import OmniVoice; print('OK')"
+export TTS_PYTHON_BIN=/path/to/that/python   # default: python3.10
 ```
 
-If OmniVoice is in a separate venv, point to it:
-```bash
-export TTS_PYTHON_BIN=/path/to/omnivoice-venv/bin/python3
-```
+1. **Voice template** — `/fk-gen-tts-template` (or `/fk-import-voice`)
+2. **Narrator text** — `PATCH /api/scenes/{id}` with `narrator_text`
+3. **Generate** — `/fk-gen-narrator` or `POST /api/videos/{vid}/narrate`
+4. **Concat** — `/fk-concat-fit-narrator` trims scene videos to the narration
 
-### Workflow
+CPU is the default (`TTS_DEVICE=cpu`; MPS produces artifacts). The API's own
+mix step (`mix=true`) only works when the scene video URL is a local file path
+— see [docs/SCENE_PIPELINE.md](docs/SCENE_PIPELINE.md#narration).
 
-1. **Create voice template** — `/fk-gen-tts-template` — generates an anchor voice WAV
-2. **Add narrator text** to scenes — `PATCH /api/scenes/{id}` with `narrator_text`
-3. **Generate narration** — `/fk-gen-narrator` — voice-clones the template for each scene
-4. **Concat with narration** — `/fk-concat-fit-narrator` — trims scene videos to match TTS duration
+## YouTube
 
-CPU-only recommended (MPS produces artifacts). ~15-30s per scene.
+- `/fk-youtube-seo`, `/fk-thumbnail`, `/fk-brand-logo` generate metadata, thumbnails and watermarks.
+- `/fk-youtube-upload` expects a user-supplied `youtube/` directory (`auth.py`, `upload.py`, `channels/<name>/…`), which is **not included** in this repository.
+- The backend endpoints `POST /api/videos/{id}/youtube/upload|publish` exist but return 503 until a YouTube client is wired in, and the required database columns are missing.
 
-## YouTube Upload Pipeline
-
-Automated upload with per-channel rules, SEO optimization, and brand watermarking.
-
-### Setup
-
-```bash
-# 1. Place OAuth credentials
-cp client_secrets.json youtube/channels/<channel_name>/
-
-# 2. Authenticate (opens browser)
-python3 youtube/auth.py <channel_name>              # Linux / Windows (WSL)
-arch -arm64 python3 youtube/auth.py <channel_name>  # macOS Apple Silicon
-
-# 3. Token saved to youtube/channels/<channel_name>/token.json (auto-refreshes)
-```
-
-### Channel Rules (`channel_rules.json`)
-
-Each channel has a rules file controlling upload scheduling and SEO:
-
-```json
-{
-  "shorts": {"max_per_day": 3, "optimal_times": ["07:00", "12:00", "17:00"]},
-  "long_form": {"max_per_day": 1, "optimal_times": ["19:00"]},
-  "scheduling": {"min_gap_hours": 4, "avoid_hours": [0,1,2,3,4,5]},
-  "seo": {"niche": "...", "default_tags": [...], "title_max_chars": 65}
-}
-```
-
-### Skill Chain
-
-```
-/fk-youtube-seo    → generates title, description, hashtags, tags
-/fk-brand-logo     → applies channel icon watermark
-/fk-youtube-upload  → validates rules + uploads (auto-detects Short vs Long-form)
-```
-
-Upload validation checks: max per day, min gap between uploads, avoid dead hours. Auto-detects Short (<61s + vertical 9:16) vs Long-form.
+Details: [docs/YOUTUBE_PUBLISHING.md](docs/YOUTUBE_PUBLISHING.md).
 
 ## Error Handling
 
-Errors can originate from four layers — Google Flow backend, Chrome extension, FastAPI layer, and the worker itself. The worker's `_handle_failure` (`agent/worker/processor.py:414-481`) routes recovery by **`error_message` string content, not HTTP status**, because Flow lumps many distinct failures under HTTP 400 with varying `details.reason` values.
+The worker routes failures by the **text** of `error_message`, not by HTTP
+status. Flow's structured reasons are appended as `"<message> [<reason>]"`.
 
-### Flow-Native Structured Errors
+| Error contains | Handling |
+|---|---|
+| `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `permission denied`, `unauthorized`, `forbidden`, `invalid request` | `FAILED` immediately |
+| `Extension not connected` / `extension disconnected` / `extension reconnected` | Retry in 5 s, not counted |
+| `captcha` / `recaptcha` (e.g. `CAPTCHA_FAILED`) | Backoff retry, up to 10 attempts |
+| `not found` (expired `media_id`) | Re-upload scene image, retry |
+| `NO_FLOW_TAB`, `NO_AT_TOKEN`, `FLOW_TAB_DISCARDED`, timeouts, `[PUBLIC_ERROR_*]` reasons | Default backoff retry up to `MAX_RETRIES` |
 
-These arrive in the response body as `data.error.details[].reason`. The worker appends the reason to `error_message` as `"<msg> [<reason>]"`.
-
-| Reason string | Meaning | Auto-handling |
-|---------------|---------|---------------|
-| `PUBLIC_ERROR_UNSAFE_GENERATION` | Prompt tripped safety filter (people, violence, nudity) | Mark FAILED — rewrite prompt (use alias names, remove triggers) |
-| `PUBLIC_ERROR_USER_QUOTA_REACHED` | Daily credits exhausted | Mark FAILED — wait for reset or upgrade tier |
-| `PUBLIC_ERROR_MODEL_ACCESS_DENIED` | Tier mismatch (e.g. TIER_ONE trying Veo 3 / upscale) | Mark FAILED — auto-detect should downgrade to allowed model |
-| `Requested entity was not found` | Uploaded `media_id` expired (~1h TTL) | Auto-recover via `_recover_entity_not_found` — re-uploads from `image_url`, re-queues PENDING |
-| `Internal error encountered` | Flow backend transient 500 | Exponential backoff retry: `2^retry * 10s`, capped 300s |
-| `reCAPTCHA failed` / `captcha` | Extension couldn't solve CAPTCHA | Retry up to 10× without incrementing `retry_count` (processor.py:454-464) |
-| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually rapid bursts of submits, VPN/shared IP, or stale auth cookies | NOT auto-recoverable. Pause submits, clear cookies for `google.com` + `labs.google` in Chrome, sign back in at `flow.google.com`, then resubmit with ≥1s gap and ≤5 concurrent. See `/fk-doctor` for full playbook. |
-
-### HTTP Status Codes
-
-| Status | Source | Meaning | Handling |
-|--------|--------|---------|----------|
-| **400** | Flow API | Invalid payload, UNSAFE_GENERATION, entity not found (sometimes) | Route by `details.reason` — some are auto-recoverable, others terminal |
-| **401** | Flow API | Should not occur — batchexecute authenticates in the page, not with a bearer | Check the Flow tab is signed in; see `NO_AT_TOKEN` |
-| **403** | Extension (`background.js:432`) | `CAPTCHA_FAILED`, `NO_FLOW_TAB`, or `MODEL_ACCESS_DENIED` | CAPTCHA → retry loop; NO_FLOW_TAB → fail (user must open Flow); tier → fail |
-| **404** | Flow API | `media_id` not found (expired upload) | Same as "Requested entity was not found" — auto re-upload |
-| **429** | Flow API | Rate limited / quota | Back off + retry; if `USER_QUOTA_REACHED` appears, fail |
-| **500** | Flow backend **or** extension fetch exception (`background.js:504`) | Transient server error OR network drop during fetch | Retry with exponential backoff |
-| **502** | FastAPI default (`agent/api/flow.py:80,92`) | Extension returned error without explicit status | Retry; check extension health |
-| **503** | FastAPI (`api/flow.py`) | "Extension not connected" | Worker waits for reconnect — status set to PENDING, not FAILED |
-| **504** | Agent | 60s timeout waiting for extension WS response | Treated as transient; re-queue PENDING |
-
-Status-code detection logic lives in `agent/worker/_parsing.py:_is_error` — a result is an error if `result.error` is set, `status >= 400`, **or** `data.error` is present.
-
-### Extension / Transport Errors
-
-String patterns in `error_message` that the worker recognizes:
-
-| Error message contains | Cause | Handling |
-|-----------------------|-------|----------|
-| `Extension not connected` | Chrome extension offline or WS dropped | 503 returned; worker re-queues PENDING and waits |
-| `extension reconnected` / `extension disconnected` | WS bounce mid-request | Re-queue PENDING without incrementing `retry_count` |
-| `extension_switched` | User switched Flow tabs mid-generation | Re-queue PENDING |
-| `NO_AT_TOKEN` | Flow tab is signed out, on an interstitial, or still booting | Open `flow.google.com`, sign in, let the app load |
-| `NO_FLOW_PROJECT` | No Flow project to scope the RPC to | Pin `FLOW_PROJECT_ID` — **terminal, not retried** |
-| `UNSUPPORTED_ON_BATCH_API` | Upscale / r2v / chaining — payload never captured | See `docs/CAPTURE.md` — **terminal, not retried** |
-| `NO_FLOW_TAB` | No Google Flow tab available for reCAPTCHA | User must open a Flow tab |
-| `Failed to fetch` | Network drop inside extension service worker | Retry with backoff |
-| `timeout` / WS 60s no response | Extension hung mid-request | Re-queue PENDING |
-
-### Worker Retry Policy
-
-`processor.py:_handle_failure` decides terminal vs retryable:
-
-1. **Auto-recover** if message contains `"not found"` → re-upload media, mark PENDING.
-2. **Transient WS** (`reconnected`/`disconnected`/`switched`) → re-queue PENDING, keep `retry_count`.
-3. **CAPTCHA** → retry up to 10× without counting toward `MAX_RETRIES`.
-4. **Default** → increment `retry_count`; if < `MAX_RETRIES` (5), schedule retry with `2^retry * 10s` backoff (capped 300s). Otherwise mark FAILED.
-
-### YouTube Upload Errors
-
-From `youtube/upload.py` (HTTP errors from YouTube Data API v3):
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `invalidTags` (400) | Tags exceed 500-char limit (incl. quote overhead: spaces → +2 per tag) | Trim tags; validate with `sum(len(t) + (2 if ' ' in t else 0) for t in tags) + (len(tags)-1) <= 500` |
-| `invalidCategoryId` (400) | Unknown category | Use `"22"` (People & Blogs) or `"24"` (Entertainment) |
-| `quotaExceeded` (403) | Daily 10K quota exhausted (uploads cost 1600) | Wait 24h (Pacific midnight reset) |
-| `uploadLimitExceeded` (400) | Channel daily upload cap hit | Wait 24h or use different channel |
-| `invalid_grant` (auth) | Token revoked or expired | Re-run `python3 youtube/auth.py <channel>` |
-| `scheduledPublishTimeInPast` | `publishAt` <= now | Use `auto_schedule()` or bump to next day |
-
-### Common Symptoms → Fix
-
-| Problem | Solution |
-|---------|----------|
-| Extension shows "Agent disconnected" | Start `python -m agent.main` |
-| Extension shows "No token" | Expected on the batch path — there is no bearer token any more |
-| `CAPTCHA_FAILED: NO_FLOW_TAB` | Open a Google Flow tab |
-| 403 `MODEL_ACCESS_DENIED` | Tier mismatch — check `/api/flow/credits`, downgrade model in `models.json` |
-| 403 `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Pause submits, clear cookies for `google.com` + `labs.google` in Chrome, sign back in, then resubmit with ≥1s gap and ≤5 concurrent. Switch network or wait 1–6 h if still blocked |
-| Scene images inconsistent | Check all refs have UUID `media_id` — run `/fk-fix-uuids` |
-| `media_id` starts with `CAMS...` | Run `/fk-fix-uuids` to extract UUID from URL |
-| Upscale "permission denied" | Requires `PAYGATE_TIER_TWO` account |
-| Request stuck in PROCESSING | Check `error_message` history; if extension dropped, restart extension |
-| "Requested entity was not found" spam | Image URLs expired — re-upload via `POST /api/upload-image` or wait for auto-recovery |
-| YouTube upload `invalidTags` | Tag-char overflow; reduce tags (quote overhead bytes count) |
-| Python `cryptography` arch mismatch | Use `python3.10`, not `python3.13` (x86/arm64 binary mismatch) |
+On any pipeline error, `/fk-doctor` diagnoses and prescribes a fix. Symptom →
+fix tables, log format and events: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Changelog
 

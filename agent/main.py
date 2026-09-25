@@ -27,6 +27,7 @@ from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
+from agent.api.ai import router as ai_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -116,6 +117,9 @@ async def lifespan(app: FastAPI):
         if not check.get("ok"):
             logger.warning("Startup dependency unavailable: %s", name)
     logger.info("SDK initialized (OperationService ready)")
+    from agent.services.ai import provider_status
+    ai = provider_status()
+    logger.info("AI content provider: %s", f"{ai['provider']} ({ai['model']}, configured={ai['configured']})" if ai["enabled"] else "disabled")
     logger.info("Flow Kit starting on %s:%d", API_HOST, API_PORT)
 
     controller = get_worker_controller()
@@ -201,6 +205,7 @@ app.include_router(reviews_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(materials_router, prefix="/api")
 app.include_router(music_router, prefix="/api")
+app.include_router(ai_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)

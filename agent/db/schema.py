@@ -194,6 +194,27 @@ CREATE TABLE IF NOT EXISTS request (
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- Validated AI provider output (story plans, YouTube metadata). Rows are only
+-- written after validation; APPLIED is set once, in the same transaction that
+-- writes the content into project/video/scene/character.
+CREATE TABLE IF NOT EXISTS ai_generation (
+    id            TEXT PRIMARY KEY,
+    operation     TEXT NOT NULL CHECK(operation IN ('STORY_PLAN','YOUTUBE_METADATA')),
+    status        TEXT NOT NULL DEFAULT 'GENERATED' CHECK(status IN ('GENERATED','APPLIED')),
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    video_id      TEXT REFERENCES video(id) ON DELETE SET NULL,
+    request_id    TEXT NOT NULL,
+    attempts      INTEGER NOT NULL DEFAULT 1,
+    input_json    TEXT NOT NULL,
+    output_json   TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    applied_at    TEXT,
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_generation_project ON ai_generation(project_id, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_scene_video ON scene(video_id);
 CREATE INDEX IF NOT EXISTS idx_scene_order ON scene(video_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);

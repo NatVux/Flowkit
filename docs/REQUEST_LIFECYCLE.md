@@ -1,40 +1,104 @@
 # Request Lifecycle
 
-Flow Kit uses four request states. `RUNNING` and `SUCCEEDED` are not separate states in this repository.
+A `request` row is one unit of Flow work, processed by the worker in
+`agent/worker/processor.py`. Four states exist: `PENDING`, `PROCESSING`,
+`COMPLETED`, `FAILED`.
 
 ```text
-PENDING -> PROCESSING -> COMPLETED
-                    \-> FAILED
-                    \-> PENDING  (retry or transient recovery)
-FAILED  -> PENDING  (explicit retry)
-COMPLETED             (terminal)
+PENDING ──claim──► PROCESSING ──► COMPLETED   (terminal)
+   ▲                  │   │
+   └── retry/defer ───┘   └──► FAILED ──(explicit retry)──► PENDING
 ```
 
-## Transition rules
+## Transitions
 
-| From | To | Meaning |
+Enforced by `crud.REQUEST_TRANSITIONS` in `crud.transition_request`:
+
+| From | To | When |
 |---|---|---|
-| `PENDING` | `PROCESSING` | An atomic worker claim started the request. |
-| `PROCESSING` | `COMPLETED` | The operation returned a usable result. |
-| `PROCESSING` | `FAILED` | The request is no longer retryable or exhausted retries. |
-| `PROCESSING` | `PENDING` | A retryable failure, missing prerequisite, or stale-worker recovery. |
-| `FAILED` | `PENDING` | An explicit retry request. |
-| `COMPLETED` | none | Completed requests are terminal. |
+| `PENDING` | `PROCESSING` | Worker claim (sets `started_at`, clears `finished_at`) |
+| `PROCESSING` | `COMPLETED` | Usable result, or the asset was already completed (skip) |
+| `PROCESSING` | `FAILED` | Permanent error or retries exhausted (sets `finished_at`) |
+| `PROCESSING` | `PENDING` | Retryable error, missing prerequisite, cancellation, stale recovery |
+| `FAILED` | `PENDING` | Explicit retry: `PATCH /api/requests/{id}` `{"status":"PENDING"}` |
+| `COMPLETED` | — | Terminal |
 
-A status update that is not in this table is rejected. Reapplying the current state is allowed for idempotent metadata updates.
+Setting the current state again is allowed (metadata-only update). Anything
+else raises `InvalidRequestTransition`. The API has no dedicated handler for
+it, so an invalid `PATCH` surfaces as HTTP 500 `INTERNAL_ERROR`.
 
-## Lifecycle metadata
+Worker updates pass the `started_at` value from their claim. If the row has
+since been reclaimed, the update raises `RequestTransitionConflict` and the old
+worker cannot overwrite the new attempt.
 
-- `created_at` and `updated_at` record row creation and mutation.
-- `started_at` records the current worker claim lease.
-- `finished_at` records completion or terminal failure.
-- `retry_count` records retry attempts.
-- `next_retry_at` persists retry backoff across restarts.
-- `error_message` contains the most recent human-readable failure.
-- `last_failure_reason` preserves the last failure cause after a retry.
+## Creating requests
 
-Worker completion, failure, and retry updates include the `started_at` value used during the claim. If a stale request has already been reclaimed, the old worker cannot transition it or overwrite the new attempt.
+| Endpoint | Duplicate active request (same scene + type) |
+|---|---|
+| `POST /api/requests` | HTTP 409 |
+| `POST /api/requests/batch` `{"requests":[…]}` | Existing active request returned in place of a new one; also de-duplicates character requests |
 
-On startup, only `PROCESSING` rows older than `STALE_PROCESSING_TIMEOUT` are returned to `PENDING`. Recovery records `stale processing recovery` as the last failure reason. Fresh processing rows are left alone.
+Both set `video.orientation` from the request's `orientation`. The database
+also rejects duplicates through partial unique indexes and triggers, and
+rejects a request whose `video_id` / `scene_id` do not belong to its
+`project_id` / `video_id`.
 
-Queue claims and state transitions run inside database transactions. The existing partial unique indexes and triggers prevent more than one active request for the same logical scene/type or character/type from being queued.
+Poll progress with `GET /api/requests/batch-status?video_id=…&type=…&orientation=…`
+(returns counts plus `done` and `all_succeeded`) rather than polling each id.
+
+## Processing
+
+1. **Claim** — every `POLL_INTERVAL` s, while the extension is connected, up
+   to the free concurrency slots (`MAX_CONCURRENT_REQUESTS`) of `PENDING` rows
+   with `next_retry_at` null or past, **oldest `created_at` first**.
+2. **Rate limit** — at most `MAX_CONCURRENT_REQUESTS` running and at least
+   `API_COOLDOWN` s between starts.
+3. **Skip** — non-regenerate image/video/upscale requests whose scene asset is
+   already `COMPLETED` finish immediately (`error_message = "skipped: already completed"`).
+4. **Prerequisites** — video needs the scene image media id; upscale needs the
+   video media id; edits need a source image. Missing → back to `PENDING`,
+   ignored for 30 s, no retry counted.
+5. **Dispatch** with a `WORKER_OPERATION_TIMEOUT` (900 s) limit.
+6. **Result** — success writes `media_id` / `output_url` and updates the
+   scene or character ([SCENE_PIPELINE.md](SCENE_PIPELINE.md)).
+
+## Failure handling
+
+Evaluated in order on the error text (case-insensitive):
+
+| Match | Outcome | `retry_count` |
+|---|---|---|
+| `not found` + source image re-uploaded successfully | `PENDING` | unchanged |
+| `unsupported_on_batch_api`, `no_flow_project`, `invalid request`, `permission denied`, `unauthorized`, `forbidden`, `not configured`, `unknown request type`, `scene not found`, `character not found` | `FAILED` | unchanged |
+| `extension reconnected` / `extension disconnected` / `extension not connected` | `PENDING`, retry in 5 s | unchanged |
+| `captcha` / `recaptcha` | `PENDING`, backoff `min(2^n·10, 300)` s; `FAILED` at n = 10 | +1 |
+| anything else | `PENDING` with backoff `min(2^n·10, 300)` s while n < `MAX_RETRIES`; else `FAILED` | +1 |
+
+Backoffs are stored in `next_retry_at` (so they survive restarts) plus up to
+`RETRY_JITTER_SECONDS` of jitter. When a request ends `FAILED`, the matching
+scene asset status is set to `FAILED` too.
+
+Flow error payloads with `data.error.details[].reason` are recorded as
+`"<message> [<reason>]"`, e.g. `… [PUBLIC_ERROR_UNSAFE_GENERATION]`. Those
+reasons are not special-cased; they follow the default row above.
+
+## Lifecycle columns
+
+| Column | Meaning |
+|---|---|
+| `created_at` / `updated_at` | Row creation / last change |
+| `started_at` | Current claim lease |
+| `finished_at` | Set on `COMPLETED` / `FAILED`, cleared otherwise |
+| `retry_count` | Counted failures |
+| `next_retry_at` | Earliest next claim |
+| `error_message` | Latest human-readable error |
+| `last_failure_reason` | Last failure cause, kept across retries |
+
+## Recovery
+
+- **Startup:** `PROCESSING` rows whose `updated_at` is older than
+  `STALE_PROCESSING_TIMEOUT` (rounded up to minutes; default 10) become
+  `PENDING` with `error_message = "reset: stale processing"`. This runs only
+  once, when the worker starts.
+- **Shutdown:** in-flight requests still running after 30 s are cancelled and
+  returned to `PENDING`.

@@ -88,6 +88,16 @@ with open(_PROVIDERS_FILE) as _pvf:
     CLI_PROVIDERS = json.load(_pvf)  # mutable dict, hot-reloaded like VIDEO_MODELS
 REVIEW_CLI_TIMEOUT_S = float(os.environ.get("REVIEW_CLI_TIMEOUT_S", "120"))
 
+# ─── AI content provider (story / scene / metadata planning) ─
+# Optional. Flow still does all image/video generation; this only writes text.
+# AI_PROVIDER: "gemini", "mock", "none", or empty for auto (gemini when a key is
+# set, otherwise disabled). The key is read here once and never logged.
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "").strip().lower()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_TIMEOUT_SECONDS = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "90"))
+GEMINI_MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "2"))  # retries after the first attempt
+
 # ─── Suno (Music Generation) — sunoapi.org ──────────────────
 def _load_suno_key() -> str:
     """Load Suno API key: env var first, then channel_rules.json fallback."""
