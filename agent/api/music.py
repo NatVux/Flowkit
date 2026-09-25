@@ -78,7 +78,7 @@ def _load_template(template_id: str) -> dict:
     path = TEMPLATES_DIR / f"{template_id}.json"
     if not path.exists():
         raise HTTPException(404, f"Template '{template_id}' not found")
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 async def _handle_suno_call(coro):
@@ -104,7 +104,7 @@ async def list_templates():
     index_path = TEMPLATES_DIR / "index.json"
     if not index_path.exists():
         raise HTTPException(404, "Song templates index not found")
-    return json.loads(index_path.read_text())
+    return json.loads(index_path.read_text(encoding="utf-8"))
 
 
 @router.get("/templates/{template_id}")

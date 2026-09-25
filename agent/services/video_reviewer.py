@@ -637,7 +637,7 @@ async def _run_codex_cli(
             args += ["-c", f'model_reasoning_effort="{effort}"']
         args.append(prompt)
         await _spawn_and_check(tuple(args), "codex")
-        answer = out_path.read_text().strip()
+        answer = out_path.read_text(encoding="utf-8").strip()
         if not answer:
             raise RuntimeError(
                 "codex CLI exited cleanly but wrote no answer to its output file"

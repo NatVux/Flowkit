@@ -1,6 +1,7 @@
 """Model configuration API — view and update video/image/upscale model keys."""
 import json
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -19,9 +20,17 @@ def _read_models() -> dict:
 
 
 def _write_models(data: dict):
-    with open(_MODELS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    tmp = _MODELS_FILE.with_suffix(".json.tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _MODELS_FILE)  # atomic within the same directory
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _reload_config(data: dict):

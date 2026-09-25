@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -322,13 +323,17 @@ async def delete_voice_template(name: str):
 
 def _load_templates_meta() -> dict:
     if TEMPLATES_META.exists():
-        return json.loads(TEMPLATES_META.read_text())
+        return json.loads(TEMPLATES_META.read_text(encoding="utf-8"))
     return {}
 
 
 def _save_templates_meta(meta: dict):
     TEMPLATES_META.parent.mkdir(parents=True, exist_ok=True)
-    TEMPLATES_META.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    # Explicit UTF-8: the Windows default (cp1252) cannot encode Vietnamese names.
+    # Write to a temp file and swap it in, so a failed write never truncates templates.json.
+    tmp_path = TEMPLATES_META.with_name(TEMPLATES_META.name + ".tmp")
+    tmp_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, TEMPLATES_META)
 
 
 def _wav_duration(path: str) -> float | None:
