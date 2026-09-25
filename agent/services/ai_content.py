@@ -76,12 +76,20 @@ STORY_SYSTEM = (
     "character, same or adjacent place, no time skip. A continuing scene's image_prompt must still state a "
     "new camera angle and composition.\n"
     "- narration is optional voice-over text for the scene, short enough to read in about 8 seconds.\n"
+    "- Music: follow the 'Background music' line below. When music is not allowed, the Audio line holds "
+    "ambient sound only.\n"
     "- Wording: harmless stories (children's tales included) are sometimes blocked by image filters by "
     "mistake when prompts use alarming words (attack, kill, blood, explosion, weapon, scream). Describe "
     "tension and emotion through expressions, light and atmosphere in gentle, non-graphic words instead.\n"
     "- Do not include art-style words (photorealistic, anime, 3D...); the style is applied separately.\n"
     "- No on-screen text, subtitles, logos or watermarks."
 )
+
+# The worker adds its own "no background music" Audio line only when a prompt has no Audio:
+# label - and video_prompt always has one - so the plan itself must keep music out.
+_MUSIC_NOT_ALLOWED = ("Background music: NOT allowed. Never mention music, songs, melodies or a soundtrack "
+                      "in any video_prompt or its Audio line; use ambient sound, dialogue and SFX only.")
+_MUSIC_ALLOWED = "Background music: allowed. The Audio line may describe music."
 
 _FRAMING = {
     "VERTICAL": "Frame: vertical 9:16 portrait. Compose every image_prompt and video_prompt for a tall frame.",
@@ -195,6 +203,7 @@ class AIContentService:
         ]
         if orientation in _FRAMING:
             lines.append(_FRAMING[orientation])
+        lines.append(_MUSIC_ALLOWED if project.get("allow_music") else _MUSIC_NOT_ALLOWED)
         if req.audience:
             lines.append(f"Audience: {req.audience}")
         if req.tone:
@@ -327,8 +336,8 @@ def _parse(text: str, model_cls: type[T], context: dict | None = None) -> T:
 # ── story-plan content checks ───────────────────────────────
 
 #: Above this share of accented words (entity names removed) a field is not English.
-#: Vietnamese prose sits around 60-90%; English with a loanword ("a blue áo bà ba") stays well below.
-ENGLISH_MAX_ACCENTED_SHARE = 0.35
+#: Vietnamese prose sits around 60-90%; a half-Vietnamese prompt around 20-35%.
+ENGLISH_MAX_ACCENTED_SHARE = 0.15
 DEFAULT_NEGATIVE_LINE = "Negative: subtitles, text overlays, watermark, distorted faces."
 _WORD = re.compile(r"[^\W\d_]+")
 _NEGATIVE = re.compile(r"\bnegative\s*:", re.IGNORECASE)

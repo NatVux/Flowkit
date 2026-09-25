@@ -250,7 +250,12 @@ class ApplyResult(BaseModel):
     status: AIGenerationStatus
     video_id: str
     characters_created: list[str] = Field(default_factory=list)
-    characters_reused: list[str] = Field(default_factory=list)
+    characters_reused: list[str] = Field(default_factory=list,
+                                         description="Every linked entity the plan matched (updated + unchanged)")
+    characters_updated: list[str] = Field(default_factory=list,
+                                          description="Reused entities without a reference image, rewritten from the plan")
+    characters_reused_unchanged: list[str] = Field(default_factory=list,
+                                                   description="Reused entities with a reference image, left as is")
     scenes_created: list[str] = Field(default_factory=list)
     video_updated: bool = False
     active_project_set: bool = False

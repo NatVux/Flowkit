@@ -348,7 +348,7 @@ def _vi_plan(continues=(False, True, True)) -> dict:
         "characters": [
             {"name": names[0], "entity_type": "character", "description": "Tiny white kitten with a brown spot over one eye",
              "voice_description": "Small squeaky meow"},
-            {"name": names[1], "entity_type": "character", "description": "Kind elderly woman in a blue áo bà ba"},
+            {"name": names[1], "entity_type": "character", "description": "Kind elderly woman in a long blue silk tunic"},
             {"name": "Paper Lantern", "entity_type": "visual_asset", "description": "Round red paper lantern"},
         ],
         "locations": [{"name": names[2], "description": "Busy night market lit by hanging lanterns"}],
@@ -384,7 +384,7 @@ class TestApplyMatchesCreateProject:
         assert chars["Chợ Đêm"]["entity_type"] == "location"
         assert chars["Paper Lantern"]["entity_type"] == "visual_asset"
         # same builder as POST /api/projects: "Name: desc. Story context: story"
-        assert chars["Bà Cụ Đèn Lồng"]["description"].startswith("Bà Cụ Đèn Lồng: Kind elderly woman in a blue áo bà ba")
+        assert chars["Bà Cụ Đèn Lồng"]["description"].startswith("Bà Cụ Đèn Lồng: Kind elderly woman in a long blue silk tunic")
         assert "Story context: Đốm lạc vào chợ đêm" in chars["Bà Cụ Đèn Lồng"]["description"]
 
         scenes = await crud.list_scenes(video["id"])
@@ -587,6 +587,99 @@ class TestStoryPlanContentQuality:
         parsed = StoryPlan.model_validate(plan)
         assert all(c.voice_description is None for c in parsed.characters)
         check_english_fields(parsed)
+
+
+# scenes[0].video_prompt exactly as gemini-3.1-flash-lite returned it on 2026-09-25 (half Vietnamese).
+REAL_MIXED_VIDEO_PROMPT = (
+    "0-4s: Mèo Con nhìn xung quanh với vẻ bối rối, tai khẽ cụp xuống khi những người qua đường vội vã lướt qua. "
+    "Then cut to 4-8s: Mèo Con bước đi rụt rè giữa không gian ồn ào. The camera pans down to match the kitten's "
+    "eye level, capturing the dizzying scale of the market. High contrast, warm lighting from the lanterns "
+    "creates glowing rim light on the fur."
+)
+
+
+class TestReusedEntitiesAndMusic:
+    async def _linked(self, project, name, **kw):
+        char = await crud.create_character(name=name, description="Mô tả cũ tiếng Việt",
+                                           image_prompt="Single reference image of Một chú mèo xám", **kw)
+        await crud.link_character_to_project(project["id"], char["id"])
+        return char
+
+    async def _apply_vi(self, project, video):
+        service, _ = _service(MockAIProvider([_vi_plan()]))
+        gen = await service.generate_story_plan(StoryPlanRequest(
+            project_id=project["id"], brief="Mèo con lạc", language="vi", scene_count=3))
+        return await service.apply_generation(gen["id"], video["id"])
+
+    async def test_reused_entity_without_reference_image_takes_the_new_plan(self, project_video):
+        project, video = project_video
+        old = await self._linked(project, "Mèo Đốm", voice_description="Old voice")
+
+        result = await self._apply_vi(project, video)
+
+        assert result["characters_updated"] == [old["id"]] and result["characters_reused_unchanged"] == []
+        assert old["id"] in result["characters_reused"]
+        cat = await crud.get_character(old["id"])
+        # rebuilt with _build_character_profile, like a freshly created entity
+        assert cat["description"].startswith("Mèo Đốm: Tiny white kitten with a brown spot over one eye. Story context: ")
+        assert "Story context: Đốm lạc vào chợ đêm đông đúc" in cat["description"]  # story language keeps diacritics
+        assert cat["image_prompt"].startswith("Single reference image of Tiny white kitten")
+        assert cat["voice_description"] == "Small squeaky meow"
+        assert cat["name"] == "Mèo Đốm" and cat["media_id"] is None
+
+    async def test_reused_entity_keeps_old_voice_when_the_plan_has_none(self, project_video):
+        project, video = project_video
+        old = await self._linked(project, "Bà Cụ Đèn Lồng", voice_description="Old gentle voice")
+        await self._apply_vi(project, video)  # _vi_plan gives her no voice_description
+        assert (await crud.get_character(old["id"]))["voice_description"] == "Old gentle voice"
+
+    async def test_reused_entity_with_reference_image_is_left_unchanged(self, project_video):
+        project, video = project_video
+        media = "fa9eb5ee-2c8f-4a7f-88ac-140580abde5b"
+        old = await self._linked(project, "Mèo Đốm", media_id=media)
+        before = await crud.get_character(old["id"])
+
+        result = await self._apply_vi(project, video)
+
+        assert result["characters_reused_unchanged"] == [old["id"]] and result["characters_updated"] == []
+        after = await crud.get_character(old["id"])
+        assert (after["description"], after["image_prompt"], after["media_id"]) == \
+            (before["description"], before["image_prompt"], media)
+
+    async def test_update_and_new_entities_in_one_apply(self, project_video):
+        project, video = project_video
+        fresh = await self._linked(project, "Mèo Đốm")
+        pinned = await self._linked(project, "Chợ Đêm", media_id="11111111-2222-3333-4444-555555555555")
+        result = await self._apply_vi(project, video)
+        assert result["characters_updated"] == [fresh["id"]]
+        assert result["characters_reused_unchanged"] == [pinned["id"]]
+        assert len(result["characters_created"]) == 2  # Bà Cụ Đèn Lồng, Paper Lantern
+        assert sorted(result["characters_reused"]) == sorted([fresh["id"], pinned["id"]])
+
+    def test_real_mixed_vietnamese_english_video_prompt_fails(self):
+        plan = _vi_plan()
+        plan["scenes"][0]["video_prompt"] = REAL_MIXED_VIDEO_PROMPT
+        with pytest.raises(AIMalformedResponseError, match=r"scenes\[0\]\.video_prompt"):
+            check_english_fields(StoryPlan.model_validate(plan), ["Mèo Con"])
+
+    def test_english_prompt_with_vietnamese_names_passes(self):
+        plan = _vi_plan()
+        plan["scenes"][1]["image_prompt"] = (
+            "Portrait vertical shot of Bà Cụ Đèn Lồng kneeling in Chợ Đêm, extending her hand towards Mèo Đốm, "
+            "soft lantern light, eye-level shot.")
+        check_english_fields(StoryPlan.model_validate(plan))
+
+    async def test_prompt_forbids_music_unless_the_project_allows_it(self, project_video):
+        project, _ = project_video
+        mock = MockAIProvider()
+        await _service(mock)[0].generate_story_plan(_story_req(project))
+        assert "Background music: NOT allowed" in mock.calls[0].prompt
+
+        await crud.update_project(project["id"], allow_music=1)
+        mock = MockAIProvider()
+        await _service(mock)[0].generate_story_plan(_story_req(project))
+        assert "Background music: allowed" in mock.calls[0].prompt
+        assert "NOT allowed" not in mock.calls[0].prompt
 
 
 class TestYouTubeMetadata:

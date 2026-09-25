@@ -667,13 +667,15 @@ async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], sce
               it a video that has scenes is a conflict, so two plans never interleave.
     title:    set as the video title when the video has none.
     Entities already linked to the project (same slug or case-insensitive name)
-    are reused. New ones get a globally unique slug. Nothing is written unless
-    everything succeeds.
+    are reused. A reused entity without a reference image (no media_id) takes the
+    plan's description/image_prompt (and voice_description when given); one with a
+    media_id is left as is. New ones get a globally unique slug. Nothing is written
+    unless everything succeeds.
     """
     from agent.utils.slugify import slugify
     db = await get_db()
     now = _now()
-    created, reused, scene_ids = [], [], []
+    created, reused, updated, unchanged, scene_ids = [], [], [], [], []
     async with schema._db_lock:
         async with transaction(db):
             claim = await _claim_generation(db, gid, "STORY_PLAN", video_id, now)
@@ -686,7 +688,8 @@ async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], sce
                     f"video already has {existing_scenes} scene(s); pass append=true to add this plan after them")
 
             cur = await db.execute(
-                "SELECT c.id, c.name, c.slug FROM character c JOIN project_character pc ON pc.character_id=c.id WHERE pc.project_id=?",
+                "SELECT c.id, c.name, c.slug, c.media_id FROM character c "
+                "JOIN project_character pc ON pc.character_id=c.id WHERE pc.project_id=?",
                 (project_id,))
             linked = [dict(r) for r in await cur.fetchall()]
             by_key = {}
@@ -702,6 +705,17 @@ async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], sce
                 if existing:
                     reused.append(existing["id"])
                     name_map[ent["name"]] = existing["name"]
+                    if existing["media_id"]:
+                        # Its reference image exists: changing the text would no longer match it.
+                        unchanged.append(existing["id"])
+                        continue
+                    # No reference image yet, so nothing depends on the old text: take the new plan's.
+                    await db.execute(
+                        "UPDATE character SET description=?, image_prompt=?, "
+                        "voice_description=COALESCE(?, voice_description), updated_at=? WHERE id=?",
+                        (ent.get("description"), ent.get("image_prompt"), ent.get("voice_description"),
+                         now, existing["id"]))
+                    updated.append(existing["id"])
                     continue
                 candidate, n = slug, 2
                 while True:
@@ -745,8 +759,9 @@ async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], sce
                     "UPDATE video SET title=?, updated_at=? WHERE id=? AND (title IS NULL OR TRIM(title)='')",
                     (title, now, video_id))
                 video_updated = cur.rowcount == 1
-    return {"characters_created": created, "characters_reused": reused, "scenes_created": scene_ids,
-            "video_updated": video_updated}
+    return {"characters_created": created, "characters_reused": reused,
+            "characters_updated": updated, "characters_reused_unchanged": unchanged,
+            "scenes_created": scene_ids, "video_updated": video_updated}
 
 
 async def apply_youtube_metadata(gid: str, video_id: str, *, title: str, description: str, tags: list[str]) -> dict:
