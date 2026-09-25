@@ -146,7 +146,7 @@ async def lifespan(app: FastAPI):
         if BACKUP_INTERVAL_SECONDS > 0 else None
     )
     runner = get_pipeline_runner()
-    runner_task = asyncio.create_task(runner.start()) if PIPELINE_RUNNER_ENABLED else None
+    runner_task = asyncio.create_task(runner.run_forever()) if PIPELINE_RUNNER_ENABLED else None
     log_event(logger, logging.INFO, "worker_started")
 
     yield

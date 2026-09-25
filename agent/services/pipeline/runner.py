@@ -55,7 +55,8 @@ class PipelineRunner:
 
     # ── loop ────────────────────────────────────────────────
 
-    async def start(self):
+    async def run_forever(self):
+        """The background loop (lifespan). Not to be confused with start(run_id)."""
         while not self._shutdown.is_set():
             await self.tick_all()
             try:
