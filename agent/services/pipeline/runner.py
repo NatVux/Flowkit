@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from agent.config import POLL_INTERVAL
 from agent.db import crud, pipeline_crud as pc
+from agent.services.event_bus import event_bus
 from agent.services.flow_client import get_flow_client
 from agent.services.pipeline import concat as pconcat, media as pmedia, planner as pl
 from agent.worker.processor import generation_cooldown_active
@@ -107,9 +108,18 @@ class PipelineRunner:
             return False
         return True
 
+    async def _transition(self, run_id: str, status: str, **fields) -> dict:
+        """Every run status change goes through here, so the dashboard hears about it."""
+        run = await pc.transition_run(run_id, status, **fields)
+        await event_bus.emit("pipeline_update", {
+            "run_id": run["id"], "video_id": run["video_id"], "status": run["status"], "stage": run["stage"],
+            "pause_reason": run["pause_reason"], "status_detail": run["status_detail"],
+            "final_path": run["final_path"]})
+        return run
+
     async def _pause(self, run: dict, reason: str, detail: str):
         held = await pc.hold_requests(run["id"], reason)
-        await pc.transition_run(run["id"], "PAUSED", pause_reason=reason, status_detail=detail,
+        await self._transition(run["id"], "PAUSED", pause_reason=reason, status_detail=detail,
                                 disconnected_since=None)
         logger.warning("pipeline run %s paused: %s (held %d requests)", run["id"][:8], reason, held)
 
@@ -269,12 +279,12 @@ class PipelineRunner:
             for item, why in missing:
                 await pc.update_item(item["id"], status="NEEDS_USER_ACTION", error_code="MISSING_CLIP",
                                      error_message=why)
-            await pc.transition_run(run["id"], "NEEDS_USER_ACTION", status_detail=(
+            await self._transition(run["id"], "NEEDS_USER_ACTION", status_detail=(
                 f"{len(missing)} clip(s) missing for concat. Redo those scene videos or place the files, "
                 "then resume."))
             return
         if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-            await pc.transition_run(run["id"], "NEEDS_USER_ACTION",
+            await self._transition(run["id"], "NEEDS_USER_ACTION",
                                     status_detail="ffmpeg/ffprobe not found on PATH; install them, then resume.")
             return
         clips = [pmedia.scene_video_file(project, s) for s in scenes]
@@ -283,10 +293,10 @@ class PipelineRunner:
         try:
             result = await asyncio.to_thread(pconcat.run_concat, clips, out, workdir)
         except pconcat.ConcatError as exc:
-            await pc.transition_run(run["id"], "NEEDS_USER_ACTION", error=str(exc)[:1000],
+            await self._transition(run["id"], "NEEDS_USER_ACTION", error=str(exc)[:1000],
                                     status_detail=f"Concat failed: {str(exc)[:300]}")
             return
-        await pc.transition_run(run["id"], "COMPLETED", final_path=result["path"], error=None,
+        await self._transition(run["id"], "COMPLETED", final_path=result["path"], error=None,
                                 status_detail=f"Final video: {result['clips']} clips, {result['duration']}s, "
                                               f"{result['width']}x{result['height']}.")
 
@@ -318,6 +328,7 @@ class PipelineRunner:
             return spec
 
         await pc.submit_items(run["id"], [i["id"] for i in items], build)
+        await event_bus.emit("pipeline_items_queued", {"run_id": run["id"], "stage": stage, "count": len(items)})
         logger.info("pipeline run %s: queued %d %s request(s)", run["id"][:8], len(items), stage)
 
     async def _maybe_finish_stage(self, run: dict, items: list[dict]):
@@ -332,17 +343,17 @@ class PipelineRunner:
         blocked = [i for i in items if i["status"] in ("NEEDS_USER_ACTION", "FAILED")]
         detail = f"{len(blocked)} item(s) in {run['stage']} need attention: " + "; ".join(
             f"{i['target_type']} {i['target_id'][:8]} {i['error_code']}" for i in blocked[:5])
-        await pc.transition_run(run["id"], "NEEDS_USER_ACTION", status_detail=detail)
+        await self._transition(run["id"], "NEEDS_USER_ACTION", status_detail=detail)
 
     async def _stage_done(self, run: dict):
         stage = run["stage"]
         following = self._next_stage(run)
         if following is None:
-            await pc.transition_run(run["id"], "COMPLETED", status_detail=f"{stage} done; nothing left.")
+            await self._transition(run["id"], "COMPLETED", status_detail=f"{stage} done; nothing left.")
             return
         if stage in run["checkpoints"]:
             est = await self._estimate(run)
-            await pc.transition_run(
+            await self._transition(
                 run["id"], "AWAITING_APPROVAL", estimate=est,
                 status_detail=f"{stage} done. Approve to start {following} "
                               f"(minimum {pl.stage_estimate(following, est)} generations).")
@@ -460,7 +471,7 @@ class PipelineRunner:
             raise pc.PipelineConflict(f"run is {run['status']}; only a DRAFT run can be started")
         self._preflight()
         est = await self._estimate(run)
-        run = await pc.transition_run(run_id, "RUNNING", expected=("DRAFT",), stage="REFS", estimate=est,
+        run = await self._transition(run_id, "RUNNING", expected=("DRAFT",), stage="REFS", estimate=est,
                                       status_detail=None)
         await self._plan_stage(run, "REFS")
         await self._tick_locked(run_id)
@@ -476,7 +487,7 @@ class PipelineRunner:
             raise pc.PipelineConflict(f"run is {run['status']}; nothing to approve")
         self._preflight()
         following = self._next_stage(run)
-        run = await pc.transition_run(run_id, "RUNNING", expected=("AWAITING_APPROVAL",), status_detail=None)
+        run = await self._transition(run_id, "RUNNING", expected=("AWAITING_APPROVAL",), status_detail=None)
         await self._enter_stage(run, following)
         await self._tick_locked(run_id)
         return await self.status(run_id)
@@ -490,7 +501,7 @@ class PipelineRunner:
         if run["status"] not in ("PAUSED", "NEEDS_USER_ACTION"):
             raise pc.PipelineConflict(f"run is {run['status']}; only a PAUSED or NEEDS_USER_ACTION run resumes")
         self._preflight()
-        await pc.transition_run(run_id, "RUNNING", expected=("PAUSED", "NEEDS_USER_ACTION"),
+        await self._transition(run_id, "RUNNING", expected=("PAUSED", "NEEDS_USER_ACTION"),
                                 pause_reason=None, status_detail=None, disconnected_since=None)
         await pc.release_requests(run_id)
         # Resuming is the person's "try again": a clip that failed to download gets one more attempt.
@@ -510,7 +521,7 @@ class PipelineRunner:
             raise pc.PipelineConflict(f"run is already {run['status']}")
         await pc.hold_requests(run_id, "cancelling")
         result = await pc.cancel_unstarted_requests(run_id)
-        await pc.transition_run(run_id, "CANCELLED",
+        await self._transition(run_id, "CANCELLED",
                                 status_detail=f"Cancelled: {result['deleted']} queued request(s) removed, "
                                               f"{result['released_to_finish']} already at Flow left to finish.")
         return await self.status(run_id)
@@ -587,7 +598,7 @@ class PipelineRunner:
         stale = []
         if target_type == "scene" and stage == "IMAGES" and not include_descendants:
             stale = sorted(self._descendants(await crud.list_scenes(run["video_id"]), target_id))
-        await pc.transition_run(run_id, "RUNNING", pause_reason=None, stage=stage,
+        await self._transition(run_id, "RUNNING", pause_reason=None, stage=stage,
                                 status_detail=f"Redo of {len(targets)} {target_type}(s) in {stage}.")
         if run["status"] == "PAUSED":
             await pc.release_requests(run_id)
