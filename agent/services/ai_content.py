@@ -51,15 +51,32 @@ STORY_SYSTEM = (
     "Rules:\n"
     "- characters/locations: every person, creature, recurring object or place that must look the same "
     "across scenes. description = visual appearance only (no actions, no story).\n"
-    "- Each scene image_prompt describes ONE still frame: action, composition, camera, lighting. Refer to "
-    "entities by their exact name; never restate their appearance.\n"
-    "- video_prompt describes ~8 seconds of motion with timing, e.g. '0-3s: ... 3-6s: ... 6-8s: ...'.\n"
+    "- Each scene image_prompt describes ONE still frame: action, environment, mood, then a camera/composition "
+    "cue (shot size, angle). Refer to entities by their exact name; never restate their appearance, clothing "
+    "or colours - reference images handle that.\n"
+    "- Faces: when a character is in frame, show the full face (front, three-quarter or profile). Never frame a "
+    "character from behind, crop the face, or make it tiny - the video model would invent the missing face. "
+    "If the face should not be seen, use a hands-only point-of-view shot or leave the character out.\n"
+    "- video_prompt is natural prose for ~8 seconds, like briefing a film director, 100-150 words: 2-3 shots "
+    "joined with 'Then cut to', the camera movement as its own sentence, and a lighting description. Dialogue, "
+    "if any, is short and written as: Name says: \"line\" (no subtitles). End with three separate lines: "
+    "'Audio: ...', 'SFX: ...', 'Negative: subtitles, watermark, text overlay.'\n"
     "- character_names lists the exact names of every defined character/location visible in the scene.\n"
-    "- continues_previous is true only when the scene continues directly from the previous shot.\n"
+    "- continues_previous is true only when the scene continues directly from the previous shot: same main "
+    "character, same or adjacent place, no time skip. A continuing scene's image_prompt must still state a "
+    "new camera angle and composition.\n"
     "- narration is optional voice-over text for the scene, short enough to read in about 8 seconds.\n"
+    "- Wording: harmless stories (children's tales included) are sometimes blocked by image filters by "
+    "mistake when prompts use alarming words (attack, kill, blood, explosion, weapon, scream). Describe "
+    "tension and emotion through expressions, light and atmosphere in gentle, non-graphic words instead.\n"
     "- Do not include art-style words (photorealistic, anime, 3D...); the style is applied separately.\n"
     "- No on-screen text, subtitles, logos or watermarks."
 )
+
+_FRAMING = {
+    "VERTICAL": "Frame: vertical 9:16 portrait. Compose every image_prompt and video_prompt for a tall frame.",
+    "HORIZONTAL": "Frame: horizontal 16:9 landscape. Compose every image_prompt and video_prompt for a wide frame.",
+}
 
 METADATA_SYSTEM = (
     "You write YouTube metadata for a finished short video. Return JSON matching the schema exactly. "
@@ -101,7 +118,7 @@ class AIContentService:
     # ── core: call, parse, validate, retry ──────────────────
 
     async def _generate(self, operation: str, system: str, prompt: str, model_cls: type[T],
-                        context: dict) -> tuple[T, dict]:
+                        context: dict, validation_context: dict | None = None) -> tuple[T, dict]:
         provider = self._provider()
         request_id = str(uuid.uuid4())
         schema = provider_schema(model_cls)
@@ -117,7 +134,7 @@ class AIContentService:
                     operation=operation, system_instruction=system, prompt=prompt,
                     response_schema=schema, request_id=request_id, timeout_seconds=self.timeout_seconds,
                 ))
-                result = _parse(response.text, model_cls)
+                result = _parse(response.text, model_cls, validation_context)
             except AIProviderError as exc:
                 duration = round((time.monotonic() - started) * 1000)
                 will_retry = exc.retryable and attempt < attempts
@@ -148,12 +165,22 @@ class AIContentService:
             raise LookupError("Project not found")
         existing = await crud.get_project_characters(req.project_id)
         language = req.language or project.get("language") or "en"
+        orientation = None
+        if req.video_id:
+            video = await crud.get_video(req.video_id)
+            if not video:
+                raise LookupError("Video not found")
+            if video["project_id"] != req.project_id:
+                raise ValueError("video does not belong to the project")
+            orientation = video.get("orientation")
 
         lines = [
             f"Brief: {req.brief}",
             f"Number of scenes: exactly {req.scene_count}",
             f"Language for story, narration and summaries: {language}. Keep prompts in English.",
         ]
+        if orientation in _FRAMING:
+            lines.append(_FRAMING[orientation])
         if req.audience:
             lines.append(f"Audience: {req.audience}")
         if req.tone:
@@ -164,11 +191,12 @@ class AIContentService:
             reuse = ", ".join(f"{c['name']} ({c['entity_type']})" for c in existing[:30])
             lines.append(f"Entities that already exist in this project (reuse these exact names when they appear): {reuse}")
         plan, meta = await self._generate("story_plan", STORY_SYSTEM, "\n".join(lines), StoryPlan,
-                                          {"project_id": req.project_id})
+                                          {"project_id": req.project_id},
+                                          {"existing_entity_names": [c["name"] for c in existing]})
         if len(plan.scenes) != req.scene_count:
             log_event(logger, logging.WARNING, "ai_scene_count_mismatch", request_id=meta["request_id"],
                       requested=req.scene_count, returned=len(plan.scenes))
-        return await self._store("STORY_PLAN", req.project_id, None, req.model_dump(), plan, meta)
+        return await self._store("STORY_PLAN", req.project_id, req.video_id, req.model_dump(), plan, meta)
 
     async def generate_youtube_metadata(self, req: YouTubeMetadataRequest) -> dict:
         self._provider()  # report "not configured" before any lookup
@@ -206,7 +234,8 @@ class AIContentService:
 
     # ── apply (non-idempotent: never retried) ───────────────
 
-    async def apply_generation(self, generation_id: str, video_id: str | None, *, chain_scenes: bool = False) -> dict:
+    async def apply_generation(self, generation_id: str, video_id: str | None, *, chain_scenes: bool = True,
+                               append: bool = False, set_active: bool = False) -> dict:
         gen = await crud.get_ai_generation(generation_id)
         if not gen:
             raise LookupError("AI generation not found")
@@ -220,9 +249,12 @@ class AIContentService:
         try:
             if gen["operation"] == "STORY_PLAN":
                 # Re-validate what was stored: the row is data, not trusted code.
-                plan = StoryPlan.model_validate(gen["output"])
+                existing = await crud.get_project_characters(gen["project_id"])
+                plan = StoryPlan.model_validate(
+                    gen["output"], context={"existing_entity_names": [c["name"] for c in existing]})
                 result = await crud.apply_story_plan(
-                    generation_id, target_video, story=plan.story, chain_scenes=chain_scenes,
+                    generation_id, target_video, story=plan.story, title=plan.title,
+                    chain_scenes=chain_scenes, append=append,
                     **await _story_rows(plan, gen["project_id"]),
                 )
             elif gen["operation"] == "YOUTUBE_METADATA":
@@ -242,10 +274,20 @@ class AIContentService:
                   duration_ms=round((time.monotonic() - started) * 1000),
                   scenes_created=len(result.get("scenes_created", [])),
                   characters_created=len(result.get("characters_created", [])), **base)
-        return {"generation_id": generation_id, "status": "APPLIED", "video_id": target_video, **result}
+        active_set = False
+        if set_active and gen["operation"] == "STORY_PLAN":
+            # After the commit: failing here must not look like a failed apply.
+            from agent.api.active_project import _write_state
+            try:
+                _write_state({"project_id": gen["project_id"]})
+                active_set = True
+            except OSError as exc:
+                log_event(logger, logging.WARNING, "ai_set_active_failed", message=str(exc)[:300], **base)
+        return {"generation_id": generation_id, "status": "APPLIED", "video_id": target_video,
+                "active_project_set": active_set, **result}
 
 
-def _parse(text: str, model_cls: type[T]) -> T:
+def _parse(text: str, model_cls: type[T], context: dict | None = None) -> T:
     """Model text → validated object. Anything else is AIMalformedResponseError."""
     raw = (text or "").strip()
     if raw.startswith("```"):  # tolerate a fenced block despite the JSON mime type
@@ -258,7 +300,7 @@ def _parse(text: str, model_cls: type[T]) -> T:
     if not isinstance(data, dict):
         raise AIMalformedResponseError(f"response JSON is a {type(data).__name__}, expected an object")
     try:
-        return model_cls.model_validate(data)
+        return model_cls.model_validate(data, context=context)
     except ValidationError as exc:
         problems = "; ".join(
             f"{'.'.join(str(p) for p in err['loc']) or '<root>'}: {err['msg']}" for err in exc.errors()[:5]
@@ -273,10 +315,11 @@ async def _story_rows(plan: StoryPlan, project_id: str) -> dict:
     from agent.utils.slugify import slugify
 
     project = await crud.get_project(project_id) or {}
-    material_id = project.get("material") or "realistic"
-    if get_material(material_id) is None:
-        material_id = "realistic"
-    material = get_material(material_id) or {}
+    material_id = project.get("material")
+    material = get_material(material_id) if material_id else None
+    if material is None:
+        # /fk-create-project requires a material; guessing one would restyle the whole project.
+        raise ValueError(f"project has no valid material ({material_id!r}); set one with PATCH /api/projects/{project_id}")
     prefix = material.get("scene_prefix") or ""
 
     entities = []

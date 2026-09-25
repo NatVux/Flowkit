@@ -655,16 +655,20 @@ async def _claim_generation(db, gid: str, operation: str, video_id: str, now: st
 
 
 async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], scenes: list[dict],
-                           story: str | None = None, chain_scenes: bool = False) -> dict:
+                           story: str | None = None, title: str | None = None,
+                           chain_scenes: bool = True, append: bool = False) -> dict:
     """Write a validated story plan into the project/video in ONE transaction.
 
     entities: {name, slug, entity_type, description, image_prompt, voice_description}
     scenes:   {prompt, video_prompt, narrator_text, character_names, continues_previous}
     chain_scenes: honour continues_previous (CONTINUATION + parent). Otherwise every
-              scene is ROOT, which renders on every video model.
+              scene is ROOT.
+    append:   the video may already have scenes; new ones go after the last. Without
+              it a video that has scenes is a conflict, so two plans never interleave.
+    title:    set as the video title when the video has none.
     Entities already linked to the project (same slug or case-insensitive name)
-    are reused. New ones get a globally unique slug. Scenes are appended after the
-    video's last scene. Nothing is written unless everything succeeds.
+    are reused. New ones get a globally unique slug. Nothing is written unless
+    everything succeeds.
     """
     from agent.utils.slugify import slugify
     db = await get_db()
@@ -674,6 +678,12 @@ async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], sce
         async with transaction(db):
             claim = await _claim_generation(db, gid, "STORY_PLAN", video_id, now)
             project_id = claim["project_id"]
+
+            cur = await db.execute("SELECT COUNT(*) FROM scene WHERE video_id=?", (video_id,))
+            existing_scenes = (await cur.fetchone())[0]
+            if existing_scenes and not append:
+                raise AIGenerationConflict(
+                    f"video already has {existing_scenes} scene(s); pass append=true to add this plan after them")
 
             cur = await db.execute(
                 "SELECT c.id, c.name, c.slug FROM character c JOIN project_character pc ON pc.character_id=c.id WHERE pc.project_id=?",
@@ -729,7 +739,14 @@ async def apply_story_plan(gid: str, video_id: str, *, entities: list[dict], sce
                 await db.execute(
                     "UPDATE project SET story=?, updated_at=? WHERE id=? AND (story IS NULL OR story='')",
                     (story, now, project_id))
-    return {"characters_created": created, "characters_reused": reused, "scenes_created": scene_ids}
+            video_updated = False
+            if title:
+                cur = await db.execute(
+                    "UPDATE video SET title=?, updated_at=? WHERE id=? AND (title IS NULL OR TRIM(title)='')",
+                    (title, now, video_id))
+                video_updated = cur.rowcount == 1
+    return {"characters_created": created, "characters_reused": reused, "scenes_created": scene_ids,
+            "video_updated": video_updated}
 
 
 async def apply_youtube_metadata(gid: str, video_id: str, *, title: str, description: str, tags: list[str]) -> dict:

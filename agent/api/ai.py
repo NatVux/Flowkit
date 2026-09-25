@@ -45,6 +45,8 @@ async def status():
 @router.post("/story-plan", response_model=AIGeneration)
 async def story_plan(body: StoryPlanRequest):
     validate_id(body.project_id, "project_id")
+    if body.video_id:
+        validate_id(body.video_id, "video_id")
     try:
         return await get_ai_content_service().generate_story_plan(body)
     except Exception as exc:  # noqa: BLE001 — mapped or re-raised
@@ -81,7 +83,8 @@ async def apply_generation(generation_id: str, body: ApplyGenerationRequest):
     if body.video_id:
         validate_id(body.video_id, "video_id")
     try:
-        return await get_ai_content_service().apply_generation(generation_id, body.video_id,
-                                                               chain_scenes=body.chain_scenes)
+        return await get_ai_content_service().apply_generation(
+            generation_id, body.video_id, chain_scenes=body.chain_scenes,
+            append=body.append, set_active=body.set_active)
     except Exception as exc:  # noqa: BLE001
         raise _http_error(exc) from exc

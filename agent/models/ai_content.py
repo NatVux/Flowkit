@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 _NAME = Field(min_length=1, max_length=80)
@@ -94,13 +94,17 @@ class StoryPlan(_Output):
     scenes: list[PlannedScene] = Field(min_length=1, max_length=30)
 
     @model_validator(mode="after")
-    def _consistent(self) -> "StoryPlan":
+    def _consistent(self, info: ValidationInfo) -> "StoryPlan":
         names: dict[str, str] = {}
         for entity in [*self.characters, *self.locations]:
             key = entity.name.lower()
             if key in names:
                 raise ValueError(f"duplicate entity name: {entity.name!r}")
             names[key] = entity.name
+        # Entities already linked to the project may be referenced without being
+        # redeclared (pass context={"existing_entity_names": [...]}).
+        for existing in (info.context or {}).get("existing_entity_names", []):
+            names.setdefault(existing.lower(), existing)
         for index, scene in enumerate(self.scenes):
             unknown = [n for n in scene.character_names if n.lower() not in names]
             if unknown:
@@ -188,6 +192,11 @@ class StoryPlanRequest(BaseModel):
     language: Optional[str] = Field(None, max_length=32, description="Defaults to the project's language")
     audience: Optional[str] = Field(None, max_length=300)
     tone: Optional[str] = Field(None, max_length=300)
+    video_id: Optional[str] = Field(
+        None,
+        description="Optional video of this project. Its orientation is given to the model for framing, "
+                    "and apply defaults to it when no video_id is passed there.",
+    )
 
 
 class YouTubeMetadataRequest(BaseModel):
@@ -196,13 +205,21 @@ class YouTubeMetadataRequest(BaseModel):
 
 
 class ApplyGenerationRequest(BaseModel):
-    video_id: Optional[str] = Field(None, description="Required for STORY_PLAN")
+    video_id: Optional[str] = Field(
+        None, description="Required for STORY_PLAN unless the story plan was generated with a video_id")
     chain_scenes: bool = Field(
-        False,
-        description="Create CONTINUATION scenes where the plan says a scene continues the previous one. "
-                    "Off by default: a continuation turns its parent's video into start+end-frame chaining, "
-                    "which is unsupported on the Veo path (use Omni Flash or FLOW_ALLOW_DEGRADED=1).",
+        True,
+        description="Create a CONTINUATION scene (parent = previous scene) only where the plan sets "
+                    "continues_previous; other scenes stay ROOT. Continuation images are edited from their "
+                    "parent, as with /fk-create-project. Only /fk-gen-chain-videos (start+end-frame video) "
+                    "hits the Veo limitation; /fk-gen-videos is unaffected. Pass false for all-ROOT scenes.",
     )
+    append: bool = Field(
+        False,
+        description="Allow adding the plan's scenes after scenes the video already has. Without it, applying "
+                    "a story plan to a video that has scenes is a conflict.",
+    )
+    set_active: bool = Field(False, description="Make the project the active project after applying.")
 
 
 class AIGeneration(BaseModel):
@@ -228,6 +245,7 @@ class ApplyResult(BaseModel):
     characters_reused: list[str] = Field(default_factory=list)
     scenes_created: list[str] = Field(default_factory=list)
     video_updated: bool = False
+    active_project_set: bool = False
 
 
 class AIStatus(BaseModel):

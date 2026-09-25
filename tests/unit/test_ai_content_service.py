@@ -248,20 +248,22 @@ class TestApplyStoryPlan:
         assert scenes[0]["prompt"].startswith("Real RAW photograph")  # material scene_prefix applied
         assert json.loads(scenes[0]["character_names"]) == ["Pippip", "Fish Stall"]
         assert scenes[0]["narrator_text"].startswith("Every morning")
-        # default: independent scenes (Veo start+end chaining is unported)
-        assert [s["chain_type"] for s in scenes] == ["ROOT", "ROOT"] and scenes[1]["parent_scene_id"] is None
+        # default: chain where the plan says continues_previous, like /fk-create-project
+        assert [s["chain_type"] for s in scenes] == ["ROOT", "CONTINUATION"]
+        assert scenes[0]["parent_scene_id"] is None and scenes[1]["parent_scene_id"] == scenes[0]["id"]
         assert scenes[0]["vertical_image_status"] == "PENDING"  # ready for the normal worker
         assert (await crud.get_project(project["id"]))["story"].startswith("Pippip runs")
         stored = await crud.get_ai_generation(gen["id"])
         assert stored["status"] == "APPLIED" and stored["video_id"] == video["id"] and stored["applied_at"]
 
-    async def test_chain_scenes_opt_in_creates_continuations(self, project_video):
+    async def test_chain_scenes_opt_out_keeps_every_scene_root(self, project_video):
         project, video = project_video
         service, _ = _service(MockAIProvider())
         gen = await service.generate_story_plan(_story_req(project))
-        await service.apply_generation(gen["id"], video["id"], chain_scenes=True)
+        await service.apply_generation(gen["id"], video["id"], chain_scenes=False)
         scenes = await crud.list_scenes(video["id"])
-        assert scenes[1]["chain_type"] == "CONTINUATION" and scenes[1]["parent_scene_id"] == scenes[0]["id"]
+        assert [s["chain_type"] for s in scenes] == ["ROOT", "ROOT"]
+        assert all(s["parent_scene_id"] is None for s in scenes)
 
     async def test_second_apply_is_rejected_not_duplicated(self, project_video):
         project, video = project_video
@@ -300,12 +302,19 @@ class TestApplyStoryPlan:
         linked = {c["name"]: c["slug"] for c in await crud.get_project_characters(project["id"])}
         assert linked == {"Pippip": "pippip", "Fish Stall": "fish_stall_2"}
 
-    async def test_scenes_append_after_existing(self, project_video):
+    async def test_video_with_scenes_needs_explicit_append(self, project_video):
         project, video = project_video
         await crud.create_scene(video_id=video["id"], display_order=0, prompt="hand-written")
         service, _ = _service(MockAIProvider())
         gen = await service.generate_story_plan(_story_req(project))
-        await service.apply_generation(gen["id"], video["id"])
+        chars_before = await _row_count("character")
+
+        with pytest.raises(crud.AIGenerationConflict, match="append"):
+            await service.apply_generation(gen["id"], video["id"])
+        assert (await crud.get_ai_generation(gen["id"]))["status"] == "GENERATED"
+        assert await _row_count("character") == chars_before and await _row_count("scene") == 1
+
+        await service.apply_generation(gen["id"], video["id"], append=True)
         assert [s["display_order"] for s in await crud.list_scenes(video["id"])] == [0, 1, 2]
 
     async def test_story_plan_requires_video(self, project_video):
@@ -325,6 +334,167 @@ class TestApplyStoryPlan:
         with pytest.raises(ValueError):
             await service.apply_generation(gen["id"], video["id"])
         assert await _row_count("scene") == 0
+
+
+def _vi_plan(continues=(False, True, True)) -> dict:
+    """A Vietnamese 3-scene plan shaped like what /fk-create-project builds by hand."""
+    names = ["Mèo Đốm", "Bà Cụ Đèn Lồng", "Chợ Đêm"]
+    return {
+        "title": "Mèo con lạc ở chợ đêm",
+        "logline": "Một chú mèo con lạc đường được bà cụ bán đèn lồng giúp về nhà.",
+        "story": "Đốm lạc vào chợ đêm đông đúc. Bà cụ bán đèn lồng thắp sáng đường về cho Đốm.",
+        "characters": [
+            {"name": names[0], "entity_type": "character", "description": "Tiny white kitten with a brown spot over one eye",
+             "voice_description": "Small squeaky meow"},
+            {"name": names[1], "entity_type": "character", "description": "Kind elderly woman in a blue áo bà ba"},
+            {"name": "Paper Lantern", "entity_type": "visual_asset", "description": "Round red paper lantern"},
+        ],
+        "locations": [{"name": names[2], "description": "Busy night market lit by hanging lanterns"}],
+        "scenes": [
+            {"summary": f"Cảnh {i + 1}", "image_prompt": f"{names[0]} in {names[2]}, shot {i + 1}. Medium shot.",
+             "video_prompt": f"Medium shot {i + 1}. The camera holds steady.\n\nAudio: market hum.\nSFX: bells.\n"
+                             "Negative: subtitles, watermark, text overlay.",
+             "narration": f"Đốm nhìn quanh, lòng đầy lo lắng ({i + 1}).",
+             "character_names": [names[0], names[1], names[2]] if i else [names[0], names[2]],
+             "continues_previous": c}
+            for i, c in enumerate(continues)
+        ],
+    }
+
+
+class TestApplyMatchesCreateProject:
+    """What apply writes must have the shape /fk-create-project writes, so gen-refs/images/videos just work."""
+
+    async def _apply(self, project, video, plan, **kw):
+        service, _ = _service(MockAIProvider([plan]))
+        gen = await service.generate_story_plan(StoryPlanRequest(
+            project_id=project["id"], brief="Mèo con lạc ở chợ đêm", language="vi", scene_count=len(plan["scenes"])))
+        return gen, await service.apply_generation(gen["id"], video["id"], **kw)
+
+    async def test_vietnamese_plan_round_trips_with_diacritics(self, project_video):
+        project, video = project_video
+        _, result = await self._apply(project, video, _vi_plan())
+
+        chars = {c["name"]: c for c in await crud.get_project_characters(project["id"])}
+        assert set(chars) == {"Mèo Đốm", "Bà Cụ Đèn Lồng", "Paper Lantern", "Chợ Đêm"}
+        assert len(result["characters_created"]) == 4
+        assert chars["Mèo Đốm"]["slug"] == "meo_dom" and chars["Chợ Đêm"]["slug"] == "cho_dem"
+        assert chars["Chợ Đêm"]["entity_type"] == "location"
+        assert chars["Paper Lantern"]["entity_type"] == "visual_asset"
+        # same builder as POST /api/projects: "Name: desc. Story context: story"
+        assert chars["Bà Cụ Đèn Lồng"]["description"].startswith("Bà Cụ Đèn Lồng: Kind elderly woman in a blue áo bà ba")
+        assert "Story context: Đốm lạc vào chợ đêm" in chars["Bà Cụ Đèn Lồng"]["description"]
+
+        scenes = await crud.list_scenes(video["id"])
+        assert json.loads(scenes[1]["character_names"]) == ["Mèo Đốm", "Bà Cụ Đèn Lồng", "Chợ Đêm"]
+        assert scenes[0]["narrator_text"] == "Đốm nhìn quanh, lòng đầy lo lắng (1)."
+        assert (await crud.get_project(project["id"]))["story"].startswith("Đốm lạc vào chợ đêm")
+        # every scene name resolves to a linked entity, which is what the worker's resolver needs
+        for s in scenes:
+            assert set(json.loads(s["character_names"])) <= set(chars)
+
+    async def test_three_scene_chain_root_then_continuations(self, project_video):
+        project, video = project_video
+        await self._apply(project, video, _vi_plan((False, True, True)))
+        s = await crud.list_scenes(video["id"])
+        assert [x["display_order"] for x in s] == [0, 1, 2]
+        assert [x["chain_type"] for x in s] == ["ROOT", "CONTINUATION", "CONTINUATION"]
+        assert [x["parent_scene_id"] for x in s] == [None, s[0]["id"], s[1]["id"]]
+
+    async def test_chain_only_where_the_plan_continues(self, project_video):
+        project, video = project_video
+        await self._apply(project, video, _vi_plan((False, True, False)))
+        s = await crud.list_scenes(video["id"])
+        assert [x["chain_type"] for x in s] == ["ROOT", "CONTINUATION", "ROOT"]
+        assert [x["parent_scene_id"] for x in s] == [None, s[0]["id"], None]
+
+    async def test_existing_project_entity_may_be_referenced_without_redeclaring(self, project_video):
+        project, video = project_video
+        old = await crud.create_character(name="Old Hero", entity_type="character")
+        await crud.link_character_to_project(project["id"], old["id"])
+        plan = default_story_plan()
+        plan["scenes"][0]["character_names"].append("old hero")  # model's own casing
+        _, result = await self._apply(project, video, plan)
+        assert result["characters_reused"] == []  # not redeclared, so nothing to reuse or create
+        scenes = await crud.list_scenes(video["id"])
+        assert json.loads(scenes[0]["character_names"]) == ["Pippip", "Fish Stall", "Old Hero"]
+
+    async def test_unknown_entity_in_stored_plan_fails_clearly_and_writes_nothing(self, project_video):
+        project, video = project_video
+        service, _ = _service(MockAIProvider())
+        gen = await service.generate_story_plan(_story_req(project))
+        tampered = dict(gen["output"])
+        tampered["scenes"] = [dict(tampered["scenes"][0], character_names=["Nobody"])]
+        db = await schema.get_db()
+        await db.execute("UPDATE ai_generation SET output_json=? WHERE id=?", (json.dumps(tampered), gen["id"]))
+        await db.commit()
+
+        with pytest.raises(ValueError, match="Nobody"):
+            await service.apply_generation(gen["id"], video["id"])
+        assert await _row_count("scene") == 0
+        assert (await crud.get_ai_generation(gen["id"]))["status"] == "GENERATED"
+
+    async def test_project_without_material_is_rejected_not_restyled(self, ai_db):
+        project = await crud.create_project(name="No material")
+        video = await crud.create_video(project_id=project["id"], title="t")
+        service, _ = _service(MockAIProvider())
+        gen = await service.generate_story_plan(_story_req(project))
+        with pytest.raises(ValueError, match="material"):
+            await service.apply_generation(gen["id"], video["id"])
+        assert await _row_count("scene") == 0 and await _row_count("character") == 0
+        assert (await crud.get_ai_generation(gen["id"]))["status"] == "GENERATED"
+
+    async def test_empty_video_title_takes_the_plan_title(self, project_video):
+        project, _ = project_video
+        untitled = await crud.create_video(project_id=project["id"], title="")
+        _, result = await self._apply(project, untitled, _vi_plan())
+        assert result["video_updated"] is True
+        assert (await crud.get_video(untitled["id"]))["title"] == "Mèo con lạc ở chợ đêm"
+
+    async def test_existing_video_title_is_kept(self, project_video):
+        project, video = project_video
+        _, result = await self._apply(project, video, _vi_plan())
+        assert result["video_updated"] is False
+        assert (await crud.get_video(video["id"]))["title"] == "Working title"
+
+    async def test_set_active_is_opt_in(self, project_video, tmp_path, monkeypatch):
+        from agent.api import active_project
+        state = tmp_path / "active_project.json"
+        monkeypatch.setattr(active_project, "_STATE_FILE", state)
+        project, video = project_video
+
+        _, result = await self._apply(project, video, default_story_plan())
+        assert result["active_project_set"] is False and not state.exists()
+
+        second = await crud.create_video(project_id=project["id"], title="second")
+        _, result = await self._apply(project, second, default_story_plan(), set_active=True)
+        assert result["active_project_set"] is True
+        assert json.loads(state.read_text(encoding="utf-8")) == {"project_id": project["id"]}
+
+    async def test_story_plan_video_id_sets_framing_and_default_apply_target(self, project_video):
+        project, _ = project_video
+        vertical = await crud.create_video(project_id=project["id"], title="v", orientation="VERTICAL")
+        mock = MockAIProvider()
+        service, _ = _service(mock)
+        gen = await service.generate_story_plan(_story_req(project, video_id=vertical["id"]))
+        assert "vertical 9:16" in mock.calls[0].prompt
+        result = await service.apply_generation(gen["id"], None)
+        assert result["video_id"] == vertical["id"] and len(result["scenes_created"]) == 2
+
+    async def test_story_plan_without_video_names_no_frame(self, project_video):
+        project, _ = project_video
+        mock = MockAIProvider()
+        await _service(mock)[0].generate_story_plan(_story_req(project))
+        assert "Frame:" not in mock.calls[0].prompt
+
+    async def test_story_plan_video_from_another_project_is_rejected(self, project_video):
+        project, _ = project_video
+        other = await crud.create_project(name="Other", id="other-project", material="realistic")
+        foreign = await crud.create_video(project_id=other["id"], title="x")
+        mock = MockAIProvider()
+        with pytest.raises(ValueError):
+            await _service(mock)[0].generate_story_plan(_story_req(project, video_id=foreign["id"]))
+        assert mock.calls == []
 
 
 class TestYouTubeMetadata:
