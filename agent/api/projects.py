@@ -334,9 +334,18 @@ async def get_output_dir(pid: str):
     }
     meta_path = output_dir / "meta.json"
     if meta_path.exists():
-        existing = json.loads(meta_path.read_text())
+        try:
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            # An earlier non-atomic write could leave this empty or corrupt; rebuild it.
+            logger.warning("Rebuilding unreadable %s", meta_path)
+            existing = {}
         meta["created_at"] = existing.get("created_at", now)
-    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    # Explicit UTF-8: the Windows default (cp1252) cannot encode Vietnamese names.
+    # Write to a temp file and swap it in, so a failed write never truncates meta.json.
+    tmp_path = meta_path.with_name(meta_path.name + ".tmp")
+    tmp_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, meta_path)
 
     return {"slug": slug, "path": f"output/{slug}", "meta": meta}
 
