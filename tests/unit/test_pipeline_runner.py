@@ -46,6 +46,12 @@ async def db(tmp_path, monkeypatch):
     monkeypatch.setattr(schema, "DB_PATH", tmp_path / "runner.db")
     await schema.init_db()
     monkeypatch.setattr("agent.config.OUTPUT_DIR", tmp_path / "output")
+
+    async def offline(*_args):  # no network in these tests; downloads are covered in test_pipeline_concat
+        raise OSError("offline")
+
+    monkeypatch.setattr(runner_module.pmedia, "fetch_url", offline)
+    monkeypatch.setattr(runner_module.pmedia, "fetch_fresh", offline)
     yield
     await schema.close_db()
 

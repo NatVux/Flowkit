@@ -11,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from datetime import datetime, timezone
 
 from agent.config import POLL_INTERVAL
 from agent.db import crud, pipeline_crud as pc
 from agent.services.flow_client import get_flow_client
-from agent.services.pipeline import planner as pl
+from agent.services.pipeline import concat as pconcat, media as pmedia, planner as pl
 from agent.worker.processor import generation_cooldown_active
 
 logger = logging.getLogger(__name__)
@@ -209,10 +210,85 @@ class PipelineRunner:
         await self._maybe_finish_stage(run, await pc.list_items(run["id"], "VIDEOS"))
 
     async def _after_videos(self, run: dict, items: list[dict]):
-        """Hook for per-scene downloads (added with the concat stage)."""
+        """Download each clip as soon as its scene's video is COMPLETED (first attempt)."""
+        project = await crud.get_project(run["project_id"])
+        p = pl.prefix(run["orientation"])
+        for item in items:
+            if item["status"] == "COMPLETED" and item["download_status"] is None:
+                await self._download(item, project, await crud.get_scene(item["target_id"]), p)
+
+    async def _download(self, item: dict, project: dict, scene: dict, p: str) -> bool:
+        dest = pmedia.scene_video_file(project, scene)
+        attempts = item["download_attempts"] + 1
+        try:
+            await pmedia.download_scene_video(scene, p, dest)
+        except pmedia.DownloadError as exc:
+            await pc.update_item(item["id"], download_status="FAILED", download_attempts=attempts,
+                                 error_message=f"download failed: {exc}"[:500])
+            return False
+        fields = {"download_status": "DOWNLOADED", "download_attempts": attempts, "local_path": str(dest)}
+        if item["error_code"] == "MISSING_CLIP":  # it was waiting on this file: resolved
+            fields.update(status="COMPLETED", error_code=None, error_message=None)
+        elif (item["error_message"] or "").startswith("download failed"):
+            fields["error_message"] = None
+        await pc.update_item(item["id"], **fields)
+        return True
 
     async def _tick_concat(self, run: dict):
-        await pc.transition_run(run["id"], "NEEDS_USER_ACTION", status_detail="Concat is not available yet.")
+        """fk-concat on local files only. A missing or unreadable clip is downloaded again
+        once; if that fails too the run waits for a person."""
+        project = await crud.get_project(run["project_id"])
+        p = pl.prefix(run["orientation"])
+        scenes = sorted(await crud.list_scenes(run["video_id"]), key=lambda s: s["display_order"])
+        await pc.add_items(run["id"], [{"stage": "VIDEOS", "target_type": "scene", "target_id": s["id"],
+                                        "status": "SKIPPED"} for s in scenes])
+        items = {i["target_id"]: i for i in await pc.list_items(run["id"], "VIDEOS")}
+        missing = []
+        for scene in scenes:
+            item = items[scene["id"]]
+            path = pmedia.scene_video_file(project, scene)
+            if await pmedia.valid_video(path):
+                if item["local_path"] != str(path) or item["error_code"] == "MISSING_CLIP":
+                    fields = {"download_status": "DOWNLOADED", "local_path": str(path)}
+                    if item["error_code"] == "MISSING_CLIP":
+                        fields.update(status="COMPLETED", error_code=None, error_message=None)
+                    await pc.update_item(item["id"], **fields)
+                continue
+            if not pl.video_done(scene, p):
+                missing.append((item, "scene has no finished video"))
+                continue
+            # Two attempts in total: the one made when the video finished (if any) plus one retry.
+            attempts, ok = item["download_attempts"], False
+            while attempts < 2 and not ok:
+                ok = await self._download(item, project, scene, p)
+                item = await pc.get_item(item["id"])
+                attempts = item["download_attempts"]
+            if not ok:
+                missing.append((item, "clip could not be downloaded (tried twice)"))
+        if missing:
+            for item, why in missing:
+                await pc.update_item(item["id"], status="NEEDS_USER_ACTION", error_code="MISSING_CLIP",
+                                     error_message=why)
+            await pc.transition_run(run["id"], "NEEDS_USER_ACTION", status_detail=(
+                f"{len(missing)} clip(s) missing for concat. Redo those scene videos or place the files, "
+                "then resume."))
+            return
+        if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+            await pc.transition_run(run["id"], "NEEDS_USER_ACTION",
+                                    status_detail="ffmpeg/ffprobe not found on PATH; install them, then resume.")
+            return
+        clips = [pmedia.scene_video_file(project, s) for s in scenes]
+        out = pmedia.final_video_file(project, run["video_id"])
+        workdir = pmedia.project_output_dir(project) / f"concat_{run['video_id'][:8]}"
+        try:
+            result = await asyncio.to_thread(pconcat.run_concat, clips, out, workdir)
+        except pconcat.ConcatError as exc:
+            await pc.transition_run(run["id"], "NEEDS_USER_ACTION", error=str(exc)[:1000],
+                                    status_detail=f"Concat failed: {str(exc)[:300]}")
+            return
+        await pc.transition_run(run["id"], "COMPLETED", final_path=result["path"], error=None,
+                                status_detail=f"Final video: {result['clips']} clips, {result['duration']}s, "
+                                              f"{result['width']}x{result['height']}.")
 
     async def _clear_end_frames(self, run: dict):
         """Each scene is its own i2v clip: start+end-frame chaining is unsupported on the batch
@@ -417,6 +493,10 @@ class PipelineRunner:
         await pc.transition_run(run_id, "RUNNING", expected=("PAUSED", "NEEDS_USER_ACTION"),
                                 pause_reason=None, status_detail=None, disconnected_since=None)
         await pc.release_requests(run_id)
+        # Resuming is the person's "try again": a clip that failed to download gets one more attempt.
+        for item in await pc.list_items(run_id, "VIDEOS"):
+            if item["error_code"] == "MISSING_CLIP" and item["download_attempts"] >= 2:
+                await pc.update_item(item["id"], download_attempts=1)
         await self._tick_locked(run_id)
         return await self.status(run_id)
 
@@ -478,6 +558,9 @@ class PipelineRunner:
                 stage = "VIDEOS"
                 # fk-gen-videos: force a video regen by resetting its status first.
                 await crud.update_scene(target_id, **{f"{p}_video_status": "PENDING"})
+                # The old clip must not be picked up by concat in place of the new one.
+                project = await crud.get_project(run["project_id"])
+                pmedia.scene_video_file(project, scene).unlink(missing_ok=True)
                 targets = [(target_id, "GENERATE_VIDEO")]
             else:
                 raise pc.PipelineConflict("scenes are redone in the IMAGES or VIDEOS stage")
