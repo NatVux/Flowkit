@@ -12,7 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS, PIPELINE_RUNNER_ENABLED
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS, PIPELINE_RUNNER_ENABLED, LOG_FILE
 from agent.services.pipeline.runner import get_pipeline_runner
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
@@ -45,7 +45,7 @@ class CallbackResponse(BaseModel):
     ok: bool
     reason: str | None = None
 
-configure_logging()
+configure_logging(LOG_FILE)
 logger = logging.getLogger(__name__)
 
 

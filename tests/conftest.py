@@ -1,6 +1,11 @@
 """Shared pytest fixtures for Flow Kit tests."""
 
+import os
+
 import pytest
+
+# Importing agent.main configures logging; keep test runs out of output/logs.
+os.environ.setdefault("LOG_FILE", "")
 
 
 @pytest.fixture

@@ -84,6 +84,8 @@ OUTPUT_DIR = BASE_DIR / "output"
 SHARED_OUTPUT_DIR = OUTPUT_DIR / "_shared"
 TTS_TEMPLATES_DIR = SHARED_OUTPUT_DIR / "tts_templates"
 MUSIC_OUTPUT_DIR = SHARED_OUTPUT_DIR / "music"
+# Server log file (rotating, UTF-8). LOG_FILE="" keeps logs on the console only.
+LOG_FILE = os.environ.get("LOG_FILE", str(OUTPUT_DIR / "logs" / "server.log"))
 
 # ─── TTS (OmniVoice) ─────────────────────────────────────────
 TTS_MODEL = os.environ.get("TTS_MODEL", "k2-fsa/OmniVoice")
