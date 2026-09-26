@@ -253,6 +253,7 @@ async def _poll_operations(
     # to a still-pending round. It is a diagnostic, not a verdict — finished
     # jobs report it too — so it is only worth quoting if we time out.
     last_complaint = None
+    last_outcome = last_poll_error = last_media = None
 
     while elapsed < timeout:
         await asyncio.sleep(poll_interval)
@@ -276,6 +277,13 @@ async def _poll_operations(
         for op in ops:
             if op.get("complaint"):
                 last_complaint = op["complaint"]
+            if op.get("outcome") is not None:
+                last_outcome = op["outcome"]
+            if op.get("poll_error"):
+                last_poll_error = op["poll_error"]
+            media = ((op.get("operation") or {}).get("metadata") or {}).get("video", {}).get("mediaId")
+            if media:
+                last_media = media
             status = op.get("status", "")
             if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
                 continue
@@ -284,7 +292,8 @@ async def _poll_operations(
                 # Log full operation for debugging failure reason
                 import json as _json
                 logger.error("Operation FAILED: name=%s full=%s", op_name, _json.dumps(op)[:1000])
-                error_msg = f"Operation failed: {op_name}"
+                reason = op.get("error") or op.get("complaint")
+                error_msg = f"Operation failed: {op_name}" + (f": {reason}" if reason else "")
                 has_error = True
                 break
             else:
@@ -299,8 +308,22 @@ async def _poll_operations(
         done_count = sum(1 for o in ops if o.get("status") == "MEDIA_GENERATION_STATUS_SUCCESSFUL")
         logger.debug("Poll %ds/%ds: %d/%d done", elapsed, timeout, done_count, len(ops))
 
-    detail = f": {last_complaint}" if last_complaint else ""
-    return {"error": f"Polling timeout after {timeout}s{detail}"}
+    return {"error": f"Polling timeout after {timeout}s"
+                     + _poll_diagnosis(last_complaint, last_outcome, last_poll_error, last_media)}
+
+
+def _poll_diagnosis(complaint, outcome, poll_error, media_id) -> str:
+    """Everything the batch polls said about a job that never finished, for error_message.
+
+    Flow does not state why a video job failed; what it leaves is the operation's
+    complaint (outcome code + text) and the media rpc refusing the job's media id.
+    """
+    parts = []
+    if complaint:
+        parts.append(complaint if outcome is None else f"{complaint} (operation outcome {outcome})")
+    if poll_error:
+        parts.append(f"last poll error: {poll_error}" + (f" (media {media_id})" if media_id else ""))
+    return (": " + "; ".join(parts)) if parts else ""
 
 
 class OperationService:

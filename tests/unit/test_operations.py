@@ -428,3 +428,44 @@ class TestSingleton:
         instance = init_operations(mock_client, mock_repo)
         retrieved = get_operations()
         assert retrieved is instance
+
+
+class TestPollDiagnosis:
+    """What a batch-path job that never finishes leaves in error_message."""
+
+    async def _poll(self, monkeypatch, rounds):
+        from agent.sdk.services import operations as ops
+
+        class Client:
+            def __init__(self):
+                self.left = list(rounds)
+
+            async def check_video_status(self, operations):
+                return {"data": {"operations": [self.left.pop(0) if self.left else rounds[-1]]}}
+
+        async def no_wait(_):
+            return None
+
+        monkeypatch.setattr(ops, "VIDEO_POLL_INTERVAL", 1)   # elapsed counts 1s per round
+        monkeypatch.setattr(ops.asyncio, "sleep", no_wait)
+        return await ops._poll_operations(Client(), [{"operation": {"name": "op-1"}}], timeout=len(rounds) or 1)
+
+    async def test_timeout_quotes_complaint_outcome_and_the_media_refusal(self, monkeypatch):
+        pending = "MEDIA_GENERATION_STATUS_PENDING"
+        result = await self._poll(monkeypatch, [
+            {"operation": {"name": "op-1"}, "status": pending, "complaint": "Media not found.", "outcome": 4},
+            {"operation": {"name": "op-1", "metadata": {"video": {"mediaId": "media-9"}}},
+             "status": pending, "poll_error": "as29s failed: [5]"},
+        ])
+        assert result["error"] == ("Polling timeout after 2s: Media not found. (operation outcome 4); "
+                                   "last poll error: as29s failed: [5] (media media-9)")
+
+    async def test_timeout_without_diagnostics_keeps_the_plain_message(self, monkeypatch):
+        result = await self._poll(monkeypatch, [{"operation": {"name": "op-1"},
+                                                 "status": "MEDIA_GENERATION_STATUS_PENDING"}])
+        assert result["error"] == "Polling timeout after 1s"
+
+    async def test_a_failed_operation_keeps_its_reason(self, monkeypatch):
+        result = await self._poll(monkeypatch, [{"operation": {}, "status": "MEDIA_GENERATION_STATUS_FAILED",
+                                                 "error": "operation carried no name"}])
+        assert result["error"] == "Operation failed: ?: operation carried no name"

@@ -403,6 +403,29 @@ class TestCheckVideoStatus:
         assert (await self._status(client))["status"] == "MEDIA_GENERATION_STATUS_SUCCESSFUL"
         assert (await self._status(client))["status"] == "MEDIA_GENERATION_STATUS_SUCCESSFUL"
 
+    async def test_a_complaint_carries_its_outcome_code_and_the_record_is_logged(self, client, caplog):
+        client.responses[fb.RPC_OPERATION] = self._poll(complaint="Media not found.")
+        client.responses[fb.RPC_PROJECT_MEDIA] = self._listing(found=False)
+
+        with caplog.at_level("INFO", logger="agent.services.flow_client"):
+            op = await self._status(client)
+            await self._status(client)
+        assert (op["complaint"], op["outcome"]) == ("Media not found.", fb.OUTCOME_COMPLAINT)
+        records = [r.getMessage() for r in caplog.records if " record: " in r.getMessage()]
+        assert len(records) == 1 and "Media not found." in records[0]   # logged once, not every round
+
+    async def test_a_media_rpc_refusal_is_carried_with_the_media_id(self, client):
+        """Seen when Google failed the job: the listing had a media id, the media rpc said [5]."""
+        client.responses[fb.RPC_OPERATION] = self._poll(status="CAE")
+        client.responses[fb.RPC_PROJECT_MEDIA] = self._listing()
+        chunk = json.dumps([["wrb.fr", fb.RPC_MEDIA, None, None, None, [5]]])
+        client.responses[fb.RPC_MEDIA] = {"data": f")]}}'\n{len(chunk)}\n{chunk}"}
+
+        op = await self._status(client)
+        assert op["status"] == "MEDIA_GENERATION_STATUS_PENDING"
+        assert op["poll_error"] == "as29s failed: [5]"
+        assert op["operation"]["metadata"]["video"]["mediaId"] == MEDIA
+
     async def test_a_nameless_operation_fails_instead_of_polling_forever(self, client):
         result = await client.check_video_status([{"operation": {}}])
         assert result["data"]["operations"][0]["status"] == "MEDIA_GENERATION_STATUS_FAILED"

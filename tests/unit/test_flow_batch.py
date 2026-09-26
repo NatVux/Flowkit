@@ -278,10 +278,19 @@ class TestReaders:
         assert op.complained and op.error == "Media not found."
         assert not op.done
 
+    def test_a_real_failed_video_operation_reads_as_a_code_4_complaint(self):
+        """Verbatim jwpduf payload for a video Google failed and refunded (2026-09-26):
+        no project, no status, only the complaint. See docs/PIPELINE_RUNNER.md."""
+        payload = [None, 250, [["09d7b8fb-10b5-43f9-8bde-52feb3e14490", None, None, None, None,
+                                [None, None, None, None, None, None, None, None,
+                                 [4, [None, "Media not found."], ["Media not found."]]]]]]
+        op = fb.read_operation(payload)
+        assert (op.outcome, op.error, op.status, op.project_id) == (4, "Media not found.", None, None)
+
     def test_a_healthy_outcome_carries_no_complaint(self):
         detail = [None] * 8 + [[fb.OUTCOME_OK]]
         op = fb.read_operation([None, 50, [[self.OP, "p", "s", "CAE", None, detail]]])
-        assert op.error is None
+        assert op.error is None and op.outcome == fb.OUTCOME_OK
 
     def test_an_empty_operation_payload_raises(self):
         with pytest.raises(fb.FlowBatchError):
