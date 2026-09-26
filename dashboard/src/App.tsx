@@ -3,6 +3,8 @@ import { BrowserRouter, NavLink, Routes, Route, useLocation, useParams, useSearc
 import { LayoutDashboard, FolderOpen, Film, ScrollText, BookOpen, SlidersHorizontal } from 'lucide-react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { WebSocketProvider } from './api/WebSocketContext'
+import { SystemStatusProvider } from './api/SystemStatus'
+import StatusBar from './components/flow/StatusBar'
 import { useWebSocketContext } from './api/useWebSocketContext'
 import { LanguageProvider } from './i18n/LanguageContext'
 import { useTranslation } from './i18n/useTranslation'
@@ -182,6 +184,7 @@ function Layout() {
       <Sidebar />
       <div className="flex flex-col flex-1 overflow-hidden">
         <Header />
+        <StatusBar />
         <main className="flex-1 overflow-auto p-5">
           <Routes>
             <Route path="/" element={<DashboardPage />} />
@@ -203,9 +206,11 @@ export default function App() {
     <BrowserRouter>
       <LanguageProvider>
         <WebSocketProvider>
-          <TooltipProvider>
-            <Layout />
-          </TooltipProvider>
+          <SystemStatusProvider>
+            <TooltipProvider>
+              <Layout />
+            </TooltipProvider>
+          </SystemStatusProvider>
         </WebSocketProvider>
       </LanguageProvider>
     </BrowserRouter>

@@ -11,8 +11,8 @@ function detectDefaultLang(): Lang {
   } catch {
     // localStorage unavailable — fall through to browser language detection
   }
-  const nav = (navigator.language || 'en').slice(0, 2).toLowerCase()
-  return (LANGS as readonly string[]).includes(nav) ? (nav as Lang) : 'en'
+  // Flow Kit's users read Vietnamese first; any other language is one click away in the sidebar.
+  return 'vi'
 }
 
 export function LanguageProvider({ children }: { children: ReactNode }) {

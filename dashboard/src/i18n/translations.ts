@@ -1,3 +1,5 @@
+import { flowEn, flowVi } from './flowStrings'
+
 export const LANGS = ['en', 'vi', 'hi', 'id', 'zh', 'ko', 'ja'] as const
 export type Lang = (typeof LANGS)[number]
 
@@ -15,6 +17,8 @@ export const LANG_LABELS: Record<Lang, string> = {
 // Real backend-sourced content (project names, prompts, error messages, AI review verdicts/severities/
 // scores, request IDs) is intentionally NOT in this dictionary — that's data, not UI chrome.
 const en = {
+  ...flowEn,
+
   // ---- common / shared vocabulary (closed enums defined in our own types, safe to localize) ----
   'common.close': 'Close',
   'common.dash': '—',
@@ -345,6 +349,8 @@ export type TranslationKey = keyof typeof en
 // Placeholder — filled in by the translation-authoring pass (vi/hi/id/zh/ko/ja).
 // Until then every non-English language silently falls back to English via useTranslation's lookup.
 const vi: Partial<Record<TranslationKey, string>> = {
+  ...flowVi,
+
   'common.close': 'Đóng',
   'common.dash': '—',
   'common.status.completed': 'HOÀN TẤT',
