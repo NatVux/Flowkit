@@ -20,6 +20,7 @@ import GuidePage from './pages/GuidePage'
 import SettingsPage from './pages/SettingsPage'
 import NewVideoPage from './pages/NewVideoPage'
 import StoryPage from './pages/StoryPage'
+import RunPage from './pages/RunPage'
 
 const NAV: { to: string; icon: typeof LayoutDashboard; labelKey: TranslationKey; exact: boolean }[] = [
   { to: '/tao-moi', icon: Sparkles, labelKey: 'nav.newVideo', exact: false },
@@ -63,6 +64,7 @@ function useBreadcrumbs() {
   if (loc.pathname === '/') crumbs.push(t('app.breadcrumb.dashboard'))
   else if (loc.pathname.startsWith('/tao-moi')) crumbs.push(t('app.breadcrumb.newVideo'))
   else if (loc.pathname.startsWith('/truyen')) crumbs.push(t('app.breadcrumb.story'))
+  else if (loc.pathname.startsWith('/chay')) crumbs.push(t('app.breadcrumb.run'))
   else if (loc.pathname.startsWith('/projects')) {
     crumbs.push(t('app.breadcrumb.projects'))
     if (id) {
@@ -195,6 +197,7 @@ function Layout() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/tao-moi" element={<NewVideoPage />} />
             <Route path="/truyen/:id" element={<StoryPage />} />
+            <Route path="/chay/:id" element={<RunPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/projects/:id" element={<ProjectsPage />} />
             <Route path="/gallery" element={<GalleryPage />} />
