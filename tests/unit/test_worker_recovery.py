@@ -154,6 +154,18 @@ class TestStartupOrphanRecovery:
         done = await crud.get_scene(scene["id"])
         assert done["vertical_video_status"] == "COMPLETED" and done["vertical_video_media_id"] == VIDEO_MEDIA
 
+    async def test_completing_clears_an_earlier_attempts_error_message(self, db, fake_ops):
+        req, _ = await _claimed("GENERATE_VIDEO", vertical_image_media_id=IMAGE_ID,
+                                vertical_image_status="COMPLETED")
+        old = ("RpcError: eb1hJf failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', "
+               "['PUBLIC_ERROR_MODEL_ACCESS_DENIED']]]]")
+        await crud.update_request(req["id"], request_id=OPERATION, error_message=old, last_failure_reason=old)
+
+        await processor._process_one(await crud.get_request(req["id"]), {}, {})
+        row = await crud.get_request(req["id"])
+        assert row["status"] == "COMPLETED" and row["error_message"] is None
+        assert row["last_failure_reason"] == old  # the history stays
+
     async def test_recovery_runs_before_the_loop_and_only_once(self, db):
         controller = processor.WorkerController()
         order = []
