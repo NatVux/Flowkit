@@ -28,6 +28,10 @@ DISCONNECT_GRACE_SECONDS = 60
 IN_FLIGHT = ("PENDING", "PROCESSING")
 DONE_ITEM = ("COMPLETED", "SKIPPED")
 REDOABLE_WHILE_RUNNING = ("FAILED", "NEEDS_USER_ACTION")
+#: Flow refunds a job it fails on its side, and nothing on the batch path says so for certain.
+GENERATIONS_SPENT_NOTE = ("Generation requests SENT to Flow, not credits charged: a job Flow fails on its "
+                          "side is refunded and still counted here. Image/reference requests count every "
+                          "attempt; a video counts once its Flow operation exists.")
 
 
 def _iso(dt: datetime) -> str:
@@ -693,8 +697,7 @@ class PipelineRunner:
             "checkpoints": run["checkpoints"], "options": run["options"], "warnings": run["warnings"],
             "estimate_at_last_checkpoint": run["estimate"], "estimate_remaining": remaining,
             "generations_spent": spent,
-            "generations_spent_note": "Approximate: image/reference requests count every attempt, "
-                                      "a video counts once its Flow operation exists.",
+            "generations_spent_note": GENERATIONS_SPENT_NOTE,
             "needs_user_action": needs, "stages": stages, "final_path": run["final_path"],
             "error": run["error"], "created_at": run["created_at"], "started_at": run["started_at"],
             "finished_at": run["finished_at"],

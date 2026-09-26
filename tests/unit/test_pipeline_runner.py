@@ -373,3 +373,11 @@ async def test_start_needs_the_extension(world):
         await r.start(run["id"])
     assert (await pc.get_run(run["id"]))["status"] == "DRAFT"
     assert await crud.list_requests() == []
+
+
+async def test_generations_spent_is_labelled_as_sent_not_charged(world):
+    r = world["runner"]
+    run = await r.create(world["video"]["id"], concat=False)
+    note = (await r.status(run["id"]))["generations_spent_note"]
+    assert note.startswith("Generation requests SENT to Flow, not credits charged")
+    assert "refunded and still counted" in note

@@ -255,8 +255,11 @@ Status response (abridged):
 - **`generations_spent`** is counted from each item's request history:
   image/reference requests count every attempt (`1 + retry_count`), a video
   counts once its Flow operation exists (retries re-poll it), a request that
-  never reached the worker or was skipped as already done counts 0. It is an
-  approximation of what Flow billed.
+  never reached the worker or was skipped as already done counts 0. **It is the
+  number of generations SENT, not the credit Flow charged**: a job Flow fails
+  on its side is refunded, and nothing on the batch path says so for certain
+  (see "Mẫu lỗi thật"), so it still counts here. Run `dcae218e` reports 4 for
+  3 actually billed. The status response says so in `generations_spent_note`.
 
 ### Redo
 
@@ -351,23 +354,21 @@ Known and left as is: the worker prunes its in-memory `_deferred` map on the
 next tick, so a "not ready yet" request is retried after one poll interval
 rather than 30 s (harmless, costs a cooldown slot).
 
-## Next time (recorded 2026-09-26, not done yet)
+## Follow-ups from the 2026-09-26 test run (done)
 
-a) **`STORY_SYSTEM`** (`agent/services/ai_content.py`): write each
-   `video_prompt` as **one continuous shot** (no "Then cut to", no second or
-   third shot in 8 s), cap its length (the working prompts were about 335
-   characters before the worker's suffixes), and leave the Audio/SFX/Negative
-   lines to the worker. Dialogue is allowed, one short line with
-   `(no subtitles)` — it was not the cause (see "Mẫu lỗi thật"). Note the
-   worker still appends "no narration, no voiceover" when the project has
-   `allow_voice` off, even to a prompt with dialogue: the two contradict.
+- **Story prompts** (`STORY_SYSTEM`): each `video_prompt` is one continuous shot
+  of at most ~350 characters, no "cut to", at most one short line of dialogue
+  with `(no subtitles)`, no Audio/SFX/Negative lines (the worker adds them). A
+  post-check retries a plan whose `video_prompt` cuts to another shot or runs
+  past 400 characters.
+- **Audio suffix**: with `allow_voice` off the worker bans a narrator
+  ("no narrator voiceover"), not the character's line of dialogue.
+- **Worker**: a request that ends `COMPLETED` clears the `error_message` of an
+  earlier attempt (`last_failure_reason` keeps it).
+- **Redo** works on a `FAILED` / `NEEDS_USER_ACTION` item while the run is
+  `RUNNING` (see Redo).
+- **`generations_spent`** stays a count of generations sent; the response
+  and this page say it is not the credit charged (refunds are not detected).
 
-b) **Runner:**
-   - Redo a failed item while the run is `RUNNING` (other items still in
-     flight) without editing the database by hand. Today redo needs
-     `AWAITING_APPROVAL` / `NEEDS_USER_ACTION` / `PAUSED`, and a stage with a
-     `SUBMITTED` item never leaves `RUNNING`; redo from `PAUSED` also releases
-     every held request of the run.
-   - `generations_spent` should not count an attempt whose credit Flow
-     refunded, if that can be recognised (refund + `as29s` NOT_FOUND + the
-     operation leaving the listing). Run `dcae218e` reports 4 for 3 billed.
+Still open: the `/fk-create-project` and `/fk-camera-guide` skills still teach
+2-3 shots joined with "then cut to" for hand-written video prompts.
