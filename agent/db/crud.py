@@ -419,6 +419,50 @@ async def create_request(req_type: str, orientation: str = None,
                 (rid, project_id, video_id, scene_id, character_id, req_type, orientation, source_media_id, now, now))
     return await _get_with_db(db, "request", "id", rid)
 
+_ACTIVE_REQUEST_STATUSES = ("PENDING", "PROCESSING")
+
+
+async def _enqueue_one_in_tx(db, item: dict, now: str) -> tuple[dict, bool]:
+    """Inside the caller's transaction: reuse the active request for the same
+    (scene_id|character_id, type), or insert a new one. Returns (row, created).
+
+    The partial unique indexes uq_active_scene_request / uq_active_character_request
+    enforce the same key, so this is the friendly path and the index the backstop.
+    """
+    req_type = item["req_type"]
+    for key in ("scene_id", "character_id"):
+        target = item.get(key)
+        if target:
+            cur = await db.execute(
+                f"SELECT * FROM request WHERE {key}=? AND type=? AND status IN (?,?) ORDER BY created_at LIMIT 1",
+                (target, req_type, *_ACTIVE_REQUEST_STATUSES))
+            row = await cur.fetchone()
+            if row is not None:
+                return dict(row), False
+            break
+    rid = _uuid()
+    await db.execute(
+        """INSERT INTO request (id,project_id,video_id,scene_id,character_id,type,orientation,source_media_id,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (rid, item.get("project_id"), item.get("video_id"), item.get("scene_id"), item.get("character_id"),
+         req_type, item.get("orientation"), item.get("source_media_id"), now, now))
+    cur = await db.execute("SELECT * FROM request WHERE id=?", (rid,))
+    return dict(await cur.fetchone()), True
+
+
+async def enqueue_deduped(items: list[dict]) -> list[tuple[dict, bool]]:
+    """Queue several requests in ONE transaction, reusing active duplicates.
+
+    items: {req_type, scene_id|character_id, project_id, video_id, orientation, source_media_id}.
+    Returns [(row, created)] in input order. Nothing is inserted unless all succeed.
+    """
+    db = await get_db()
+    now = _now()
+    async with schema._db_lock:
+        async with transaction(db):
+            return [await _enqueue_one_in_tx(db, item, now) for item in items]
+
+
 async def get_request(rid: str): return await _get("request", "id", rid)
 
 
@@ -554,6 +598,22 @@ async def claim_actionable_requests(exclude_ids: set[str] = None, limit: int = 5
             cur = await db.execute(f"SELECT * FROM request WHERE id IN ({placeholders})", ids)
             rows = [dict(row) for row in await cur.fetchall()]
             return sorted(rows, key=lambda row: ids.index(row["id"]))
+
+
+async def reset_orphaned_processing() -> int:
+    """At startup, before the worker runs: every PROCESSING row is an orphan of the
+    previous process, whatever its age. Back to PENDING, keeping request_id (the Flow
+    operation id), so a video retry re-polls its operation instead of resubmitting.
+    An image request has no stored operation and is submitted again."""
+    db = await get_db()
+    now = _now()
+    async with schema._db_lock:
+        async with transaction(db):
+            cursor = await db.execute(
+                "UPDATE request SET status='PENDING', finished_at=NULL, error_message='reset: orphaned at startup', "
+                "last_failure_reason='startup orphan recovery', updated_at=? WHERE status='PROCESSING'",
+                (now,))
+        return cursor.rowcount
 
 
 async def reset_stale_processing(cutoff_minutes: int = 10) -> int:

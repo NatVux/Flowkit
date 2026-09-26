@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
+from pathlib import Path
 from typing import Any
 
 _SENSITIVE_PARTS = (
@@ -36,11 +38,21 @@ def log_event(logger: logging.Logger, level: int, event: str, *, exc_info: bool 
     logger.log(level, json.dumps(payload, ensure_ascii=True, sort_keys=True), exc_info=exc_info)
 
 
-def configure_logging() -> None:
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s %(message)s"
+LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
+LOG_FILE_BACKUPS = 5
+
+
+def configure_logging(log_file: str | Path | None = None) -> None:
+    """Log to the console and, when ``log_file`` is set, to a rotating UTF-8 file."""
     level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
-        force=True,
-    )
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        path = Path(log_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.handlers.RotatingFileHandler(
+            path, maxBytes=LOG_FILE_MAX_BYTES, backupCount=LOG_FILE_BACKUPS,
+            encoding="utf-8", delay=True,
+        ))
+    logging.basicConfig(level=level, format=LOG_FORMAT, handlers=handlers, force=True)

@@ -70,6 +70,7 @@ class FlowClient:
         self._operation_projects: dict[str, str] = {}
         self._operation_media: dict[str, str] = {}
         self._operation_polls: dict[str, int] = {}
+        self._operation_raw: dict[str, str] = {}  # last logged operation record
         self._generation_slots = asyncio.Semaphore(FLOW_GENERATION_MAX_CONCURRENT)
         self._generation_rate_gate = asyncio.Lock()
         self._generation_last_submit_at = 0.0
@@ -703,6 +704,7 @@ class FlowClient:
             self._operation_projects.clear()
             self._operation_media.clear()
             self._operation_polls.clear()
+            self._operation_raw.clear()
         self._operation_projects[operation_id] = project_id
 
     # ─── High-level API Methods ──────────────────────────────
@@ -984,24 +986,26 @@ class FlowClient:
             except Exception as e:
                 # A hiccup on one poll round costs a round, not the job.
                 logger.warning("Operation %s poll failed: %s", op_id[:20], e)
-                out.append(_as_pending_operation(op_id, error=str(e)))
+                out.append(_as_pending_operation(
+                    op_id, poll_error=str(e), media_id=self._operation_media.get(op_id)))
         return {"status": 200, "data": {"operations": out}}
 
     async def _poll_batch_operation(self, operation_id: str) -> dict:
         media_id = self._operation_media.get(operation_id)
-        complaint = None
+        complaint = outcome = None
 
         if not media_id:
-            media_id, complaint = await self._find_operation_media(operation_id)
+            media_id, complaint, outcome = await self._find_operation_media(operation_id)
             if not media_id:
-                return _as_pending_operation(operation_id, error=complaint)
+                return _as_pending_operation(operation_id, error=complaint, outcome=outcome)
             self._operation_media[operation_id] = media_id
 
         urls = await self._batch_media_urls(media_id)
         if not urls.video:
             # The id landed but the clip is still being written; downloading
             # now would save the poster still instead of the video.
-            return _as_pending_operation(operation_id, error=complaint, media_id=media_id)
+            return _as_pending_operation(operation_id, error=complaint, media_id=media_id,
+                                         outcome=outcome)
 
         # The media id stays cached rather than being cleared here: a batch
         # with several operations re-polls the finished ones alongside the
@@ -1015,7 +1019,7 @@ class FlowClient:
             "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
         }
 
-    async def _find_operation_media(self, operation_id: str) -> tuple[str | None, str | None]:
+    async def _find_operation_media(self, operation_id: str) -> tuple[str | None, str | None, int | None]:
         """Ask the operation how it is going, then the listing where its media is.
 
         The listing is the authority — the poll has been seen to never report a
@@ -1027,14 +1031,18 @@ class FlowClient:
         self._operation_polls[operation_id] = rounds
 
         project_id = self._operation_projects.get(operation_id) or FLOW_PROJECT_ID
-        complaint = None
+        complaint = outcome = None
         worth_looking = rounds % 3 == 0
         try:
-            operation = fb.read_operation(
-                await self._batch_payload(
-                    fb.RPC_OPERATION, fb.operation_request(operation_id), timeout=60)
-            )
-            complaint = operation.error
+            payload = await self._batch_payload(
+                fb.RPC_OPERATION, fb.operation_request(operation_id), timeout=60)
+            raw = json.dumps(payload, ensure_ascii=False)[:4000]
+            if self._operation_raw.get(operation_id) != raw:
+                # The only place a failed job's own reason is visible: keep it in the log.
+                self._operation_raw[operation_id] = raw
+                logger.info("Operation %s record: %s", operation_id, raw)
+            operation = fb.read_operation(payload)
+            complaint, outcome = operation.error, operation.outcome
             project_id = operation.project_id or project_id
             if project_id:
                 self._remember_operation(operation_id, project_id)
@@ -1047,10 +1055,10 @@ class FlowClient:
             worth_looking = True
 
         if not worth_looking:
-            return None, complaint
+            return None, complaint, outcome
         if not project_id:
-            return None, "no project id for the listing lookup"
-        return await self._media_id_for(operation_id, project_id), complaint
+            return None, "no project id for the listing lookup", outcome
+        return await self._media_id_for(operation_id, project_id), complaint, outcome
 
     async def _media_id_for(self, operation_id: str, project_id: str) -> str | None:
         """Find an operation's media id in the project listing.
@@ -1068,6 +1076,9 @@ class FlowClient:
             raise fb.FlowBatchError(f"{fb.RPC_PROJECT_MEDIA}: {result['error']}")
         raw = result.get("data") or ""
         media_id = fb.find_media_id_in_text(raw, operation_id)
+        at = raw.find(operation_id)
+        if at != -1:
+            logger.info("Operation %s listing entry: %s", operation_id, raw[at:at + 800])
         if not media_id and raw.lstrip().startswith(")]}"):
             # an extension that cannot filter hands back the whole envelope
             try:
@@ -1157,7 +1168,8 @@ def _as_media_record(image: "fb.GeneratedImage") -> dict:
 
 
 def _as_pending_operation(operation_id: str, error: str | None = None,
-                          media_id: str | None = None) -> dict:
+                          media_id: str | None = None, outcome: int | None = None,
+                          poll_error: str | None = None) -> dict:
     """An operation that has not produced a fetchable clip yet.
 
     ``error`` is carried, not acted on: a poll complaint is a diagnostic that
@@ -1171,6 +1183,11 @@ def _as_pending_operation(operation_id: str, error: str | None = None,
         entry["operation"]["metadata"] = {"video": {"mediaId": media_id}}
     if error:
         entry["complaint"] = error
+    if outcome is not None:
+        entry["outcome"] = outcome
+    if poll_error:
+        # the poll itself failed (e.g. the media rpc answering NOT_FOUND): quoted on a timeout
+        entry["poll_error"] = poll_error
     return entry
 
 

@@ -40,28 +40,21 @@ async def create(body: RequestCreate):
             validate_id(data[key], key)
     data["req_type"] = data.pop("type")
 
-    # Reject if there's already an active request for the same scene + type
-    scene_id = data.get("scene_id")
-    req_type = data.get("req_type")
-    if scene_id and req_type:
-        existing = await crud.list_requests(scene_id=scene_id)
-        active = [r for r in existing
-                  if r.get("type") == req_type
-                  and r.get("status") in ("PENDING", "PROCESSING")]
-        if active:
-            raise HTTPException(
-                409,
-                f"Active {req_type} request already exists for scene {scene_id[:8]} "
-                f"(status={active[0]['status']}, id={active[0]['id'][:8]})"
-            )
-
     # Auto-set video orientation (symmetric with batch endpoint)
     vid = data.get("video_id")
     orient = data.get("orientation")
     if vid and orient:
         await crud.update_video(vid, orientation=orient)
 
-    return await crud.create_request(**data)
+    # Reject if there's already an active request for the same scene + type
+    [(row, created)] = await crud.enqueue_deduped([data])
+    if not created and data.get("scene_id"):
+        raise HTTPException(
+            409,
+            f"Active {data['req_type']} request already exists for scene {data['scene_id'][:8]} "
+            f"(status={row['status']}, id={row['id'][:8]})"
+        )
+    return row
 
 
 @router.post("/batch", response_model=list[Request])
@@ -76,36 +69,16 @@ async def create_batch(body: BatchRequestCreate):
         if vid and orient and vid not in _seen_vids:
             _seen_vids.add(vid)
             await crud.update_video(vid, orientation=orient)
-    results = []
+    items = []
     for item in body.requests:
         data = item.model_dump(exclude_none=True)
         for key in ("project_id", "video_id", "scene_id", "character_id"):
             if data.get(key):
                 validate_id(data[key], key)
         data["req_type"] = data.pop("type")
-        scene_id = data.get("scene_id")
-        character_id = data.get("character_id")
-        req_type = data.get("req_type")
-        # Idempotent: skip if active request already exists
-        if scene_id and req_type:
-            existing = await crud.list_requests(scene_id=scene_id)
-            active = [r for r in existing
-                      if r.get("type") == req_type
-                      and r.get("status") in ("PENDING", "PROCESSING")]
-            if active:
-                results.append(active[0])
-                continue
-        if character_id and req_type:
-            existing = await crud.list_requests(project_id=data.get("project_id"))
-            active = [r for r in existing
-                      if r.get("character_id") == character_id
-                      and r.get("type") == req_type
-                      and r.get("status") in ("PENDING", "PROCESSING")]
-            if active:
-                results.append(active[0])
-                continue
-        results.append(await crud.create_request(**data))
-    return results
+        items.append(data)
+    # One transaction; an active request for the same scene/character + type is returned, not duplicated.
+    return [row for row, _created in await crud.enqueue_deduped(items)]
 
 
 @router.get("", response_model=list[Request])

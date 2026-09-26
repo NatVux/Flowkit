@@ -428,3 +428,72 @@ class TestSingleton:
         instance = init_operations(mock_client, mock_repo)
         retrieved = get_operations()
         assert retrieved is instance
+
+
+class TestPollDiagnosis:
+    """What a batch-path job that never finishes leaves in error_message."""
+
+    async def _poll(self, monkeypatch, rounds):
+        from agent.sdk.services import operations as ops
+
+        class Client:
+            def __init__(self):
+                self.left = list(rounds)
+
+            async def check_video_status(self, operations):
+                return {"data": {"operations": [self.left.pop(0) if self.left else rounds[-1]]}}
+
+        async def no_wait(_):
+            return None
+
+        monkeypatch.setattr(ops, "VIDEO_POLL_INTERVAL", 1)   # elapsed counts 1s per round
+        monkeypatch.setattr(ops.asyncio, "sleep", no_wait)
+        return await ops._poll_operations(Client(), [{"operation": {"name": "op-1"}}], timeout=len(rounds) or 1)
+
+    async def test_timeout_quotes_complaint_outcome_and_the_media_refusal(self, monkeypatch):
+        pending = "MEDIA_GENERATION_STATUS_PENDING"
+        result = await self._poll(monkeypatch, [
+            {"operation": {"name": "op-1"}, "status": pending, "complaint": "Media not found.", "outcome": 4},
+            {"operation": {"name": "op-1", "metadata": {"video": {"mediaId": "media-9"}}},
+             "status": pending, "poll_error": "as29s failed: [5]"},
+        ])
+        assert result["error"] == ("Polling timeout after 2s: Media not found. (operation outcome 4); "
+                                   "last poll error: as29s failed: [5] (media media-9)")
+
+    async def test_timeout_without_diagnostics_keeps_the_plain_message(self, monkeypatch):
+        result = await self._poll(monkeypatch, [{"operation": {"name": "op-1"},
+                                                 "status": "MEDIA_GENERATION_STATUS_PENDING"}])
+        assert result["error"] == "Polling timeout after 1s"
+
+    async def test_a_failed_operation_keeps_its_reason(self, monkeypatch):
+        result = await self._poll(monkeypatch, [{"operation": {}, "status": "MEDIA_GENERATION_STATUS_FAILED",
+                                                 "error": "operation carried no name"}])
+        assert result["error"] == "Operation failed: ?: operation carried no name"
+
+
+class TestVideoPromptAudioSuffix:
+    """allow_voice is about a narrator; it must not forbid a character's line in the prompt."""
+
+    async def _build(self, prompt, *, allow_voice=False, allow_music=False):
+        project = {"id": PROJECT_ID, "allow_voice": allow_voice, "allow_music": allow_music}
+        with patch.object(ops_module.crud, "get_project", AsyncMock(return_value=project)), \
+             patch.object(ops_module.crud, "get_project_characters", AsyncMock(return_value=[])):
+            return await ops_module._build_video_prompt(prompt, {"character_names": []}, PROJECT_ID)
+
+    async def test_dialogue_without_voice_keeps_the_line_and_bans_only_a_narrator(self):
+        out = await self._build('Minh whispers: "Hello?" (no subtitles) The camera pushes in.')
+        assert "Audio: natural ambient sounds and the character dialogue, no background music, " \
+               "no narrator voiceover." in out
+        assert "sounds only" not in out and "no narration" not in out
+
+    async def test_no_dialogue_without_voice_is_ambient_only_and_no_narrator(self):
+        out = await self._build("The boy looks up at the glowing tree. The camera tilts up.")
+        assert "Audio: natural ambient sounds only, no background music, no narrator voiceover." in out
+
+    async def test_voice_allowed_keeps_dialogue(self):
+        out = await self._build("The boy looks up.", allow_voice=True)
+        assert "Audio: no background music. Keep character dialogue and natural ambient sounds." in out
+
+    async def test_a_prompt_with_its_own_audio_line_gets_no_second_one(self):
+        out = await self._build("The boy looks up.\n\nAudio: crickets.")
+        assert out.count("Audio:") == 1

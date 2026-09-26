@@ -179,6 +179,7 @@ class Operation:
     project_id: Optional[str]
     status: Optional[str]
     error: Optional[str] = None
+    outcome: Optional[int] = None
 
     @property
     def done(self) -> bool:
@@ -676,7 +677,19 @@ def read_operation(payload: Any) -> Operation:
         project_id=record[1] if len(record) > 1 else None,
         status=record[3] if len(record) > 3 else None,
         error=read_operation_error(record),
+        outcome=read_operation_outcome(record),
     )
+
+
+def read_operation_outcome(record: list) -> Optional[int]:
+    """The outcome code in the detail block's status slot (3 ok, 4 complaint), if any."""
+    detail = record[5] if len(record) > 5 else None
+    if not isinstance(detail, list) or len(detail) <= 8:
+        return None
+    block = detail[8]
+    if isinstance(block, list) and block and isinstance(block[0], int):
+        return block[0]
+    return None
 
 
 def read_operation_error(record: list) -> Optional[str]:

@@ -66,18 +66,17 @@ STORY_SYSTEM = (
     "- Faces: when a character is in frame, show the full face (front, three-quarter or profile). Never frame a "
     "character from behind, crop the face, or make it tiny - the video model would invent the missing face. "
     "If the face should not be seen, use a hands-only point-of-view shot or leave the character out.\n"
-    "- video_prompt covers ~8 seconds, 100-150 words, either as prose (2-3 shots joined with 'Then cut to') "
-    "or as timed beats ('0-3s: ... 3-6s: ... 6-8s: ...'); give the camera movement its own sentence and "
-    "describe the lighting. Dialogue, "
-    "if any, is short and written as: Name says: \"line\" (no subtitles). End with three separate lines: "
-    "'Audio: ...', 'SFX: ...', 'Negative: subtitles, watermark, text overlay.'\n"
+    "- video_prompt covers ~8 seconds as ONE continuous shot in plain prose, at most 350 characters. Never "
+    "cut to another shot: no 'Then cut to', no second or third shot, no timed beats. Give the camera "
+    "movement its own sentence and describe the lighting. At most one short line of dialogue, written as: "
+    "Name says: \"line\" (no subtitles). Do not write 'Audio:', 'SFX:' or 'Negative:' lines - they are "
+    "added when the video is generated.\n"
     "- character_names lists the exact names of every defined character/location visible in the scene.\n"
     "- continues_previous is true only when the scene continues directly from the previous shot: same main "
     "character, same or adjacent place, no time skip. A continuing scene's image_prompt must still state a "
     "new camera angle and composition.\n"
     "- narration is optional voice-over text for the scene, short enough to read in about 8 seconds.\n"
-    "- Music: follow the 'Background music' line below. When music is not allowed, the Audio line holds "
-    "ambient sound only.\n"
+    "- Music: follow the 'Background music' line below. When music is not allowed, never mention music.\n"
     "- Wording: harmless stories (children's tales included) are sometimes blocked by image filters by "
     "mistake when prompts use alarming words (attack, kill, blood, explosion, weapon, scream). Describe "
     "tension and emotion through expressions, light and atmosphere in gentle, non-graphic words instead.\n"
@@ -85,11 +84,11 @@ STORY_SYSTEM = (
     "- No on-screen text, subtitles, logos or watermarks."
 )
 
-# The worker adds its own "no background music" Audio line only when a prompt has no Audio:
-# label - and video_prompt always has one - so the plan itself must keep music out.
+# video_prompt carries no Audio: line, so the worker appends its own ("no background music" unless the
+# project allows music); the plan must still not ask for music in the prose itself.
 _MUSIC_NOT_ALLOWED = ("Background music: NOT allowed. Never mention music, songs, melodies or a soundtrack "
-                      "in any video_prompt or its Audio line; use ambient sound, dialogue and SFX only.")
-_MUSIC_ALLOWED = "Background music: allowed. The Audio line may describe music."
+                      "in any video_prompt.")
+_MUSIC_ALLOWED = "Background music: allowed. A video_prompt may mention music."
 
 _FRAMING = {
     "VERTICAL": "Frame: vertical 9:16 portrait. Compose every image_prompt and video_prompt for a tall frame.",
@@ -217,7 +216,7 @@ class AIContentService:
         plan, meta = await self._generate("story_plan", STORY_SYSTEM, "\n".join(lines), StoryPlan,
                                           {"project_id": req.project_id},
                                           {"existing_entity_names": existing_names},
-                                          lambda p: check_english_fields(p, existing_names))
+                                          lambda p: check_story_plan(p, existing_names))
         if len(plan.scenes) != req.scene_count:
             log_event(logger, logging.WARNING, "ai_scene_count_mismatch", request_id=meta["request_id"],
                       requested=req.scene_count, returned=len(plan.scenes))
@@ -338,9 +337,12 @@ def _parse(text: str, model_cls: type[T], context: dict | None = None) -> T:
 #: Above this share of accented words (entity names removed) a field is not English.
 #: Vietnamese prose sits around 60-90%; a half-Vietnamese prompt around 20-35%.
 ENGLISH_MAX_ACCENTED_SHARE = 0.15
-DEFAULT_NEGATIVE_LINE = "Negative: subtitles, text overlays, watermark, distorted faces."
+#: The system prompt asks for at most 350 characters; this leaves room before a retry is spent.
+#: A long multi-shot prompt (828 chars, "Then cut to") is what Google failed and refunded on
+#: 2026-09-26 while one continuous shot of ~335 chars rendered - see docs/PIPELINE_RUNNER.md.
+VIDEO_PROMPT_MAX_CHARS = 400
 _WORD = re.compile(r"[^\W\d_]+")
-_NEGATIVE = re.compile(r"\bnegative\s*:", re.IGNORECASE)
+_CUT_TO = re.compile(r"\bcut\s+to\b", re.IGNORECASE)
 
 
 def _accented_share(text: str, names: list[str]) -> float:
@@ -373,11 +375,26 @@ def check_english_fields(plan: StoryPlan, extra_names: list[str] = ()) -> None:
         raise AIMalformedResponseError("response failed language check, must be English: " + "; ".join(bad))
 
 
-def with_negative_line(video_prompt: str) -> str:
-    """Accept prose or timed beats as-is; only add a default Negative line when there is none."""
-    if _NEGATIVE.search(video_prompt):
-        return video_prompt
-    return f"{video_prompt.rstrip()}\n\n{DEFAULT_NEGATIVE_LINE}"
+def check_video_prompts(plan: StoryPlan) -> None:
+    """Post-check: each video_prompt is one continuous shot of bounded length.
+
+    Raises AIMalformedResponseError naming each offending scene, so the normal retry runs.
+    """
+    bad = []
+    for i, s in enumerate(plan.scenes):
+        if len(s.video_prompt) > VIDEO_PROMPT_MAX_CHARS:
+            bad.append(f"scenes[{i}].video_prompt ({len(s.video_prompt)} chars, max {VIDEO_PROMPT_MAX_CHARS})")
+        if _CUT_TO.search(s.video_prompt):
+            bad.append(f"scenes[{i}].video_prompt (cuts to another shot)")
+    if bad:
+        raise AIMalformedResponseError("response failed video_prompt check, must be one continuous shot: "
+                                       + "; ".join(bad))
+
+
+def check_story_plan(plan: StoryPlan, extra_names: list[str] = ()) -> None:
+    """All story-plan post-checks; each raises AIMalformedResponseError for a retry."""
+    check_english_fields(plan, extra_names)
+    check_video_prompts(plan)
 
 
 async def _story_rows(plan: StoryPlan, project_id: str) -> dict:
@@ -406,7 +423,7 @@ async def _story_rows(plan: StoryPlan, project_id: str) -> dict:
     for sc in plan.scenes:
         prompt = sc.image_prompt if not prefix or sc.image_prompt.startswith(prefix) else f"{prefix} {sc.image_prompt}"
         scenes.append({
-            "prompt": prompt, "video_prompt": with_negative_line(sc.video_prompt), "narrator_text": sc.narration,
+            "prompt": prompt, "video_prompt": sc.video_prompt, "narrator_text": sc.narration,
             "character_names": sc.character_names, "continues_previous": sc.continues_previous,
         })
     return {"entities": entities, "scenes": scenes}

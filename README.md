@@ -55,6 +55,7 @@ Standalone local system to generate AI videos via Google Flow. A Python FastAPI 
 | [docs/EXTENSION_PROTOCOL.md](docs/EXTENSION_PROTOCOL.md) · [docs/IMAGE_API.md](docs/IMAGE_API.md) · [docs/OMNI_FLASH.md](docs/OMNI_FLASH.md) · [docs/CAPTURE.md](docs/CAPTURE.md) | Flow bridge and payload details |
 | [docs/YOUTUBE_PUBLISHING.md](docs/YOUTUBE_PUBLISHING.md) | YouTube status |
 | [docs/AI_CONTENT.md](docs/AI_CONTENT.md) | Optional Gemini planning: stories, scenes, prompts, narration, YouTube metadata |
+| [docs/PIPELINE_RUNNER.md](docs/PIPELINE_RUNNER.md) | Server-side refs → images → videos → concat for one video, with checkpoints, redo and restart recovery |
 
 ## Current Implementation
 

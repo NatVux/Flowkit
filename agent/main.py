@@ -12,7 +12,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, BACKUP_INTERVAL_SECONDS, PIPELINE_RUNNER_ENABLED, LOG_FILE
+from agent.services.pipeline.runner import get_pipeline_runner
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -28,6 +29,7 @@ from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
 from agent.api.ai import router as ai_router
+from agent.api.pipeline import router as pipeline_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -43,7 +45,7 @@ class CallbackResponse(BaseModel):
     ok: bool
     reason: str | None = None
 
-configure_logging()
+configure_logging(LOG_FILE)
 logger = logging.getLogger(__name__)
 
 
@@ -133,19 +135,29 @@ async def lifespan(app: FastAPI):
 
     # Start background tasks
     ws_task = asyncio.create_task(run_ws_server())
+    # Orphaned PROCESSING rows from the previous process go back to PENDING before
+    # the worker (or anything else) can claim or read them.
+    await controller.recover_orphaned()
+    # Requests held by a pipeline run that ended or vanished must not stay unclaimable.
+    await get_pipeline_runner().sweep_holds()
     worker_task = asyncio.create_task(controller.start())
     backup_task = (
         asyncio.create_task(run_backup_scheduler(BACKUP_INTERVAL_SECONDS))
         if BACKUP_INTERVAL_SECONDS > 0 else None
     )
+    runner = get_pipeline_runner()
+    runner_task = asyncio.create_task(runner.run_forever()) if PIPELINE_RUNNER_ENABLED else None
     log_event(logger, logging.INFO, "worker_started")
 
     yield
 
+    runner.request_shutdown()
     controller.request_shutdown()
     await controller.drain()
     ws_task.cancel()
     worker_task.cancel()
+    if runner_task:
+        runner_task.cancel()
     if backup_task:
         backup_task.cancel()
     await close_db()
@@ -231,6 +243,7 @@ app.include_router(tts_router, prefix="/api")
 app.include_router(materials_router, prefix="/api")
 app.include_router(music_router, prefix="/api")
 app.include_router(ai_router, prefix="/api")
+app.include_router(pipeline_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)

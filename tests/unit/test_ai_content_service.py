@@ -16,7 +16,8 @@ from agent.services.ai.base import (
 from agent.services.ai.gemini import GeminiProvider
 from agent.services.ai.mock import MockAIProvider, default_story_plan, default_youtube_metadata
 from agent.services.ai_content import (
-    DEFAULT_NEGATIVE_LINE, AIContentService, AIContentUnavailable, check_english_fields, with_negative_line,
+    STORY_SYSTEM, VIDEO_PROMPT_MAX_CHARS, AIContentService, AIContentUnavailable, check_english_fields,
+    check_video_prompts,
 )
 
 SECRET = "AIzaTEST-secret-key-value-123"
@@ -560,25 +561,53 @@ class TestStoryPlanContentQuality:
         assert props["story"]["description"].startswith("In the story language")
         assert props["scenes"]["items"]["properties"]["image_prompt"]["description"].startswith("ENGLISH")
 
-    def test_negative_line_is_added_only_when_missing(self):
-        timed = "0-4s: Mèo Đốm looks around. 4-8s: slow push-in."
-        assert with_negative_line(timed) == f"{timed}\n\n{DEFAULT_NEGATIVE_LINE}"
-        assert DEFAULT_NEGATIVE_LINE == "Negative: subtitles, text overlays, watermark, distorted faces."
-        prose = "Medium shot. The camera holds.\n\nAudio: hum.\nNegative: subtitles, watermark."
-        assert with_negative_line(prose) == prose
+    def test_system_prompt_asks_for_one_continuous_shot_without_audio_lines(self):
+        assert "ONE continuous shot" in STORY_SYSTEM and "at most 350 characters" in STORY_SYSTEM
+        assert "no 'Then cut to'" in STORY_SYSTEM and "At most one short line of dialogue" in STORY_SYSTEM
+        assert "Do not write 'Audio:', 'SFX:' or 'Negative:' lines" in STORY_SYSTEM
 
-    async def test_apply_writes_timed_and_prose_video_prompts_with_a_negative_line(self, project_video):
+    def test_one_short_continuous_shot_passes_the_video_check(self):
+        plan = _vi_plan()
+        plan["scenes"][0]["video_prompt"] = (
+            'Mèo Đốm peeks out from behind a lantern stall. Mèo Đốm says: "Hello?" (no subtitles) '
+            "The camera slowly pushes in. Warm lantern light.")
+        check_video_prompts(StoryPlan.model_validate(plan))  # must not raise
+
+    @pytest.mark.parametrize("prompt, reason", [
+        ("Wide shot of Mèo Đốm in the market. Then cut to a close-up of his face.", "cuts to another shot"),
+        ("Mèo Đốm looks up. CUT TO the lanterns swaying.", "cuts to another shot"),
+        ("Mèo Đốm walks slowly past the stalls. " * 12, f"max {VIDEO_PROMPT_MAX_CHARS}"),
+    ])
+    def test_a_cut_or_an_overlong_video_prompt_fails_the_check(self, prompt, reason):
+        plan = _vi_plan()
+        plan["scenes"][1]["video_prompt"] = prompt
+        with pytest.raises(AIMalformedResponseError, match=r"scenes\[1\]\.video_prompt") as exc:
+            check_video_prompts(StoryPlan.model_validate(plan))
+        assert reason in str(exc.value)
+
+    async def test_a_multi_shot_video_prompt_is_retried_then_stored(self, project_video):
+        project, _ = project_video
+        bad = _vi_plan()
+        bad["scenes"][0]["video_prompt"] = "Mèo Đốm looks around. Then cut to the old woman smiling."
+        mock = MockAIProvider([bad, _vi_plan()])
+        service, sleeps = _service(mock)
+        gen = await service.generate_story_plan(StoryPlanRequest(
+            project_id=project["id"], brief="x", language="vi", scene_count=3))
+        assert gen["attempts"] == 2 and sleeps.delays == [2.0]
+        assert "cut to" not in gen["output"]["scenes"][0]["video_prompt"].lower()
+
+    async def test_apply_stores_the_video_prompt_as_written(self, project_video):
+        """The worker appends the Audio/Negative lines when the video is generated."""
         project, video = project_video
         plan = _vi_plan()
-        plan["scenes"][0]["video_prompt"] = "0-4s: Mèo Đốm looks around. 4-8s: slow push-in on Mèo Đốm."
+        plan["scenes"][0]["video_prompt"] = "Mèo Đốm looks around. The camera slowly pushes in. Warm light."
         service, _ = _service(MockAIProvider([plan]))
         gen = await service.generate_story_plan(StoryPlanRequest(
             project_id=project["id"], brief="x", language="vi", scene_count=3))
         await service.apply_generation(gen["id"], video["id"])
         scenes = await crud.list_scenes(video["id"])
-        assert scenes[0]["video_prompt"].endswith("\n\n" + DEFAULT_NEGATIVE_LINE)
-        assert scenes[1]["video_prompt"] == plan["scenes"][1]["video_prompt"]  # already had one: untouched
-        assert scenes[1]["video_prompt"].count("Negative:") == 1
+        assert scenes[0]["video_prompt"] == plan["scenes"][0]["video_prompt"]
+        assert scenes[1]["video_prompt"] == plan["scenes"][1]["video_prompt"]
 
     def test_voice_description_stays_optional(self):
         plan = _vi_plan()

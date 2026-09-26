@@ -63,6 +63,8 @@ STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "600")
 WORKER_OPERATION_TIMEOUT = int(os.environ.get("WORKER_OPERATION_TIMEOUT", "900"))  # 15 min
 RETRY_JITTER_SECONDS = float(os.environ.get("RETRY_JITTER_SECONDS", "3"))
 BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", "0"))
+# Pipeline runner loop (docs/PIPELINE_RUNNER.md). Runs only move when started/approved.
+PIPELINE_RUNNER_ENABLED = os.environ.get("PIPELINE_RUNNER_ENABLED", "1") == "1"
 
 # ─── Model Keys (loaded from models.json for easy updates) ──
 _MODELS_FILE = Path(__file__).parent / "models.json"
@@ -82,6 +84,8 @@ OUTPUT_DIR = BASE_DIR / "output"
 SHARED_OUTPUT_DIR = OUTPUT_DIR / "_shared"
 TTS_TEMPLATES_DIR = SHARED_OUTPUT_DIR / "tts_templates"
 MUSIC_OUTPUT_DIR = SHARED_OUTPUT_DIR / "music"
+# Server log file (rotating, UTF-8). LOG_FILE="" keeps logs on the console only.
+LOG_FILE = os.environ.get("LOG_FILE", str(OUTPUT_DIR / "logs" / "server.log"))
 
 # ─── TTS (OmniVoice) ─────────────────────────────────────────
 TTS_MODEL = os.environ.get("TTS_MODEL", "k2-fsa/OmniVoice")
