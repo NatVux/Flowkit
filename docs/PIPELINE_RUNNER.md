@@ -245,9 +245,14 @@ Status response (abridged):
   "stages": {"IMAGES": {"total": 3, "done": 3, "items": [
      {"label": "scene #1", "status": "COMPLETED", "wave": 1, "request_type": "EDIT_IMAGE",
       "request_status": "COMPLETED", "redo_count": 0, "requests_made": 1, "generations_spent": 1, ...}]}},
-  "final_path": null
+  "final_path": null, "final_url": null
 }
 ```
+
+`final_url` and each item's `local_url` are `/files/...` links to the same
+files for the dashboard (`GET /files/<path>` serves read-only files from the
+output directory, no listing; `POST /api/system/open-folder {"path"}` shows
+one in Explorer). Both refuse anything outside the output directory.
 
 - **Estimates are minimums**: one generation per entity/scene still to do,
   including scenes a new reference will reset. Worker retries of transient
@@ -370,5 +375,4 @@ rather than 30 s (harmless, costs a cooldown slot).
 - **`generations_spent`** stays a count of generations sent; the response
   and this page say it is not the credit charged (refunds are not detected).
 
-Still open: the `/fk-create-project` and `/fk-camera-guide` skills still teach
-2-3 shots joined with "then cut to" for hand-written video prompts.
+The `/fk-create-project` and `/fk-camera-guide` skills teach the same rule for hand-written video prompts.

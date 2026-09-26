@@ -90,7 +90,7 @@ Note: `description` now specifies back view — this flows into `image_prompt` g
 ```
 prompt: "Real RAW photograph, shot on Canon EOS R5. View from behind The Commander standing at podium in situation room, his silhouette against a large screen showing regional map, advisors seated facing him, dramatic overhead lighting."
 
-video_prompt: "Medium shot of The Commander seen from behind at a podium, hand gesturing firmly at the large screen showing a regional map, advisors seated facing him. The camera holds steady. Dramatic overhead lighting casts deep shadows, cool blue glow from the screen illuminating his silhouette. Then cut to close-up of his broad shoulders tensing, slow push toward the screen as markers appear one by one. The camera slowly dollies in. Warm overhead rim light contrasts with the cool blue screen glow, dark room atmosphere.\n\nAudio: quiet hum of electronics, muffled breathing, air conditioning.\nSFX: map markers clicking into place, pen tapping on table.\nNegative: subtitles, watermark, text overlay, blurry faces."
+video_prompt: "Medium shot of The Commander seen from behind at a podium, gesturing firmly at a large screen as map markers appear one by one, advisors seated facing him. The camera slowly dollies in. Dramatic overhead light, cool blue glow from the screen on his silhouette."
 ```
 
 Camera stays behind. Viewers see the leader's power through body language, not face.
@@ -222,46 +222,28 @@ When a scene has `end_scene_media_id` (start+end frame video generation), the AI
 - Last scene in a chain (no child): `transition_prompt` = empty (video uses `video_prompt` as normal)
 - When `transition_prompt` is set AND `end_scene_media_id` exists, the video generator uses `transition_prompt` instead of `video_prompt`
 
-**Format:** Natural prose describing the full motion trajectory from THIS scene's frame to the NEXT scene's frame. 100–150 words, camera movement as separate sentence, Audio/SFX/Negative at end.
+**Format:** Natural prose describing the full motion trajectory from THIS scene's frame to the NEXT scene's frame, as ONE continuous shot of at most ~350 characters (no "cut to"), camera movement as its own sentence. Leave out Audio/SFX/Negative lines — the worker appends them.
+
+> Start+end-frame chaining is not available on the current Flow batch API (`UNSUPPORTED_ON_BATCH_API`); the pipeline runner renders every scene as its own clip. `transition_prompt` only matters if chaining comes back.
 
 **Example:**
 ```
 Scene 4 (soldiers drinking in barracks):
-  video_prompt: "Medium wide shot of soldiers gathered around a rough wooden table,
-    tin cups raised, warm candlelight flickering on their faces. The Defector laughs
-    and raises his cup, eyes bright with camaraderie. The camera slowly dollies in
-    toward his face. Then cut to close-up as his smile gradually fades, eyes darting
-    toward the barracks door, jaw tightening. Warm candlelight, golden tones deepening
-    to shadow.
+  video_prompt: "Medium wide shot of soldiers around a rough wooden table, tin cups
+    raised. The Defector laughs, then his smile fades and his eyes dart toward the
+    barracks door. The camera slowly dollies in toward his face. Warm candlelight
+    deepening to shadow."
 
-    Audio: muffled laughter, liquid sloshing in cups, crackling fire.
-    SFX: tin cups clinking, chair creaking.
-    Negative: subtitles, watermark, text overlay."
-
-  transition_prompt: "Medium shot of the Defector raising his cup among laughing
-    soldiers in the warm barracks interior. The camera holds steady. His expression
-    shifts — he puts down the cup, glances toward the barracks door, jaw tightening.
-    The camera slowly dollies in on his face, half in shadow. He rises abruptly,
-    pushes the chair back, and moves toward the door. The camera tracks him from
-    behind as warm golden candlelight gives way to cold blue moonlight spilling
-    through the doorway.
-
-    Audio: laughter fading, wind seeping through door cracks.
-    SFX: chair scraping wood floor, heavy boots on planks, door latch lifting.
-    Negative: subtitles, watermark, text overlay."
+  transition_prompt: "Medium shot of the Defector among laughing soldiers. He puts
+    down his cup, rises and walks toward the barracks door. The camera tracks him
+    from behind. Warm candlelight gives way to cold blue moonlight at the doorway."
 
 Scene 5 (Defector bursting through door — CHILD of scene 4):
   start_image = scene 5's image (Defector at door)
-  video_prompt: "Medium shot of the Defector bursting through the barracks door,
-    stumbling into cold night air, warm light spilling from the doorway behind him.
-    The camera follows with handheld movement, slight shake. He steadies himself
-    against the wall, breathing hard, breath visible in the freezing cold. Then cut
-    to wide shot as he breaks into a run toward darkness, barracks shrinking behind
-    him. Cold blue moonlight, his silhouette against the snow.
-
-    Audio: cold wind howling, heavy breathing, distant dogs barking.
-    SFX: door slamming shut, boots crunching on frozen ground.
-    Negative: subtitles, watermark, text overlay."
+  video_prompt: "Medium shot of the Defector bursting through the barracks door into
+    the freezing night, breath visible, then breaking into a run across the snow.
+    The camera follows handheld. Cold blue moonlight, warm light spilling from the
+    doorway behind him."
 ```
 
 Scene 4's video uses `transition_prompt` because it has `end_scene_media_id` (scene 5's image). The prompt describes the journey FROM drinking → TO bursting through door.
@@ -357,42 +339,27 @@ Write video prompts as **natural prose** — like briefing a film director. Veo 
 **5-component structure:** `[Camera/Shot] + [Subject] + [Action] + [Setting] + [Style & Audio]`
 
 **Critical rules:**
-- **100–150 words** (3–6 sentences)
+- **ONE continuous shot per 8s clip** — never `then cut to`, no second or third shot, no timestamp beats
+- **At most ~350 characters** (2–4 sentences). A long multi-shot prompt (828 characters, "Then cut to") is what Google failed and refunded on 2026-09-26, while one-shot prompts of ~335 characters rendered — see `docs/PIPELINE_RUNNER.md`
 - **Camera movement as separate sentence** — never embed in action description
-- **Audio/SFX/Music labels** at end of prompt, separated
-- **Negative prompt** always appended: `Negative: subtitles, watermark, text overlay`
-- 2–3 shots max per 8s clip, use `then cut to` or timestamp format
-- Every prompt needs: lighting description + audio description
+- Every prompt needs a lighting description
+- **Leave out Audio/SFX/Negative lines** — the worker appends an Audio line (music/narrator rules from the project's `allow_music` / `allow_voice`) and a Negative line when the prompt has none
 
 **Dialogue rules:**
 - Use `:` format to avoid subtitles: `Character says: "line" (no subtitles)`
-- Keep short — must fit in ~8 seconds of speech
+- **At most one short line** per clip — it must fit in ~8 seconds of speech
 - Describe voice: `in a deep gravelly voice`, `whispering`
 - Delivery verbs: `says`, `whispers`, `shouts`, `gasps`, `asks`, `replies`, `murmurs`
 - Silent segments are powerful — not every shot needs dialogue
 
-**Emotional arc pattern (map to 8s):**
-```
-Opening  (0-2s): Wide/establishing — set the stage
-Rising   (2-5s): Medium + tracking or dolly in — build engagement
-Peak     (5-7s): Close-up — maximum emotion
-Release  (7-8s): Pull back to wide — breathing room
-```
+**Emotion inside one shot:** build it with a camera move rather than a cut — a slow dolly in toward a face, a crane down onto the subject, a pull back to reveal the setting.
 
 **Example:**
 ```
-Wide shot of Luna emerging from a rocket onto a vast candy landscape,
-cotton candy clouds towering above, long candy-colored shadows stretching
-across the ground. The camera cranes down smoothly. Luna gasps: "Wow!"
-(no subtitles) Then cut to low angle tracking shot as she takes her first
-steps on candy ground, looking around in wonder. Luna says: "Everything
-is made of candy!" (no subtitles) Finally, wide static shot of Luna small
-against the vast landscape, golden backlight creating a rim light around her.
-Warm golden hour light, soft pastel tones.
-
-Audio: gentle warm breeze, faint magical shimmer.
-SFX: soft footsteps on crystallized sugar ground.
-Negative: subtitles, watermark, text overlay.
+Wide shot of Luna stepping from a rocket onto a vast candy landscape,
+cotton candy clouds towering above. The camera cranes down smoothly.
+Luna gasps: "Everything is candy!" (no subtitles) Warm golden hour light,
+soft pastel tones.
 ```
 
 See `fk-camera-guide.md` for full Veo 3 camera/lighting/audio vocabulary and prompt template.
@@ -448,7 +415,7 @@ curl -X PATCH http://127.0.0.1:8100/api/scenes/<SID> \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Hero charges across the Castle bridge at dawn, sword raised, golden light catching the blade. Wide shot.",
-    "video_prompt": "Wide shot of Hero sprinting across the Castle bridge at dawn, golden light catching the blade of Magic Sword raised high. The camera tracks alongside with steady movement. Warm golden hour light, long shadows stretching across ancient stone. Then cut to medium shot as Hero raises Magic Sword overhead, light bursting from the blade, wind whipping his cloak. The camera slowly dollies in, shallow depth of field. Finally, close-up on Hero's determined face, Castle gate looming behind, warm side light.\n\nAudio: wind across stone bridge, distant morning birds.\nSFX: boots pounding on stone, sword ringing, cloak snapping.\nNegative: subtitles, watermark, text overlay.",
+    "video_prompt": "Wide shot of Hero sprinting across the Castle bridge at dawn, Magic Sword raised high, light catching the blade. The camera tracks alongside. Warm golden hour light, long shadows across ancient stone.",
     "character_names": ["Hero", "Castle", "Magic Sword"],
     "narrator_text": "The hero charged forward, knowing there was no turning back."
   }'

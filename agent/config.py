@@ -81,6 +81,8 @@ DEFAULT_IMAGE_MODEL = _MODELS.get("default_image_model", "NANO_BANANA_PRO")
 
 # ─── Output Directories ─────────────────────────────────────
 OUTPUT_DIR = BASE_DIR / "output"
+# Built dashboard served at / (npm run build in dashboard/; start.bat does it)
+DASHBOARD_DIST = Path(os.environ.get("DASHBOARD_DIST", BASE_DIR / "dashboard" / "dist"))
 SHARED_OUTPUT_DIR = OUTPUT_DIR / "_shared"
 TTS_TEMPLATES_DIR = SHARED_OUTPUT_DIR / "tts_templates"
 MUSIC_OUTPUT_DIR = SHARED_OUTPUT_DIR / "music"

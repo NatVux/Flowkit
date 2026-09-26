@@ -212,6 +212,20 @@ Full design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Full instructions, including Windows: [docs/SETUP.md](docs/SETUP.md).
 
+### Windows, daily use (no terminal)
+
+**Double-click `start.bat`** in the flowkit folder. It:
+
+1. prepares the dashboard when `dashboard/dist` is missing or older than the
+   dashboard sources ("Đang chuẩn bị giao diện…": `npm ci` the first time, then
+   `npm run build`; needs [Node.js LTS](https://nodejs.org) installed once);
+2. starts the server (`.venv\Scripts\python.exe -m agent.main`, a minimised
+   window — closing it stops the server) unless it is already running;
+3. opens **http://127.0.0.1:8100**, where the server itself serves the dashboard.
+
+Keep one signed-in `flow.google.com` tab open. The server listens on 127.0.0.1
+only. Logs: `output\logs\server.log`.
+
 ### Install
 
 ```bash

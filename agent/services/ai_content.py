@@ -106,6 +106,14 @@ class AIContentUnavailable(RuntimeError):
     """No AI provider is enabled/configured."""
 
 
+class PlanValidationError(ValueError):
+    """An edited story plan failed the same checks as model output. `problems`: [{loc, msg}]."""
+
+    def __init__(self, problems: list[dict]):
+        self.problems = problems
+        super().__init__("; ".join(f"{p['loc']}: {p['msg']}" for p in problems))
+
+
 class AIContentService:
     def __init__(
         self,
@@ -244,6 +252,34 @@ class AIContentService:
         metadata, meta = await self._generate("youtube_metadata", METADATA_SYSTEM, "\n".join(lines),
                                               YouTubeMetadata, {"video_id": req.video_id})
         return await self._store("YOUTUBE_METADATA", video["project_id"], req.video_id, req.model_dump(), metadata, meta)
+
+    async def update_story_plan(self, generation_id: str, data: dict) -> dict:
+        """Save a person's edits to a story plan before it is applied.
+
+        The edit goes through exactly what model output goes through - StoryPlan validation
+        (with the project's existing entity names) and check_story_plan (English prompts, one
+        continuous shot) - so apply can trust it the same way. No provider call.
+        """
+        gen = await crud.get_ai_generation(generation_id)
+        if not gen:
+            raise LookupError("AI generation not found")
+        if gen["operation"] != "STORY_PLAN":
+            raise ValueError("only a story plan can be edited")
+        existing = [c["name"] for c in await crud.get_project_characters(gen["project_id"])]
+        try:
+            plan = StoryPlan.model_validate(data, context={"existing_entity_names": existing})
+        except ValidationError as exc:
+            raise PlanValidationError([
+                {"loc": ".".join(str(p) for p in err["loc"]) or "plan", "msg": err["msg"]}
+                for err in exc.errors()[:20]]) from exc
+        try:
+            check_story_plan(plan, existing)
+        except AIMalformedResponseError as exc:
+            raise PlanValidationError(_check_problems(str(exc))) from exc
+        row = await crud.update_ai_generation_output(generation_id, "STORY_PLAN", plan.model_dump(mode="json"))
+        log_event(logger, logging.INFO, "ai_generation_edited", generation_id=generation_id,
+                  project_id=gen["project_id"], scenes=len(plan.scenes))
+        return row
 
     async def _store(self, operation: str, project_id: str, video_id: str | None, input_data: dict,
                      result: BaseModel, meta: dict) -> dict:
@@ -389,6 +425,15 @@ def check_video_prompts(plan: StoryPlan) -> None:
     if bad:
         raise AIMalformedResponseError("response failed video_prompt check, must be one continuous shot: "
                                        + "; ".join(bad))
+
+
+_CHECK_PART = re.compile(r"(\w+)\[(\d+)\]\.(\w+) \(([^)]*)\)")
+
+
+def _check_problems(message: str) -> list[dict]:
+    """'...: scenes[0].video_prompt (cuts to another shot); ...' -> [{loc: 'scenes.0.video_prompt', msg}]."""
+    problems = [{"loc": f"{m[1]}.{m[2]}.{m[3]}", "msg": m[4]} for m in _CHECK_PART.finditer(message)]
+    return problems or [{"loc": "plan", "msg": message}]
 
 
 def check_story_plan(plan: StoryPlan, extra_names: list[str] = ()) -> None:

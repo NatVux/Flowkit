@@ -18,6 +18,7 @@ from agent.config import POLL_INTERVAL
 from agent.db import crud, pipeline_crud as pc
 from agent.services.event_bus import event_bus
 from agent.services.flow_client import get_flow_client
+from agent.services.output_files import file_url
 from agent.services.pipeline import concat as pconcat, media as pmedia, planner as pl
 from agent.worker.processor import generation_cooldown_active
 
@@ -681,7 +682,8 @@ class PipelineRunner:
                 "request_type": item["request_type"], "request_id": item["request_id"],
                 "request_status": current["status"] if current else None,
                 "error_code": item["error_code"], "error_message": item["error_message"],
-                "local_path": item["local_path"], "download_status": item["download_status"],
+                "local_path": item["local_path"], "local_url": file_url(item["local_path"]),
+                "download_status": item["download_status"],
                 "redo_count": item["redo_count"], "requests_made": len(item["request_history"]),
                 "generations_spent": item_spent,
             })
@@ -699,6 +701,7 @@ class PipelineRunner:
             "generations_spent": spent,
             "generations_spent_note": GENERATIONS_SPENT_NOTE,
             "needs_user_action": needs, "stages": stages, "final_path": run["final_path"],
+            "final_url": file_url(run["final_path"]),
             "error": run["error"], "created_at": run["created_at"], "started_at": run["started_at"],
             "finished_at": run["finished_at"],
         }

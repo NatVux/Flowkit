@@ -381,3 +381,13 @@ async def test_generations_spent_is_labelled_as_sent_not_charged(world):
     note = (await r.status(run["id"]))["generations_spent_note"]
     assert note.startswith("Generation requests SENT to Flow, not credits charged")
     assert "refunded and still counted" in note
+
+
+async def test_status_gives_dashboard_urls_for_local_files(world):
+    from agent import config
+    r = world["runner"]
+    run = await r.create(world["video"]["id"], concat=False)
+    assert (await r.status(run["id"]))["final_url"] is None
+    final = config.OUTPUT_DIR / "thu_nghiem_gemini" / "thu_nghiem_gemini_final.mp4"
+    await pc.transition_run(run["id"], "CANCELLED", final_path=str(final))
+    assert (await r.status(run["id"]))["final_url"] == "/files/thu_nghiem_gemini/thu_nghiem_gemini_final.mp4"

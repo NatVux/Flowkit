@@ -279,6 +279,9 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
         </TabsContent>
 
         <TabsContent value="pipeline" className="pt-4">
+          <div className="mb-3 rounded-md border px-3 py-2 text-xs" style={{ borderColor: 'var(--yellow)', color: 'var(--text)' }} role="alert">
+            {t('advanced.pipelineWarning')}
+          </div>
           {videos.length === 0 ? (
             <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('projectDetail.pipeline.noVideos')}</div>
           ) : (

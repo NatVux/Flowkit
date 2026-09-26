@@ -70,8 +70,8 @@ class PlannedScene(_Output):
     image_prompt: str = Field(min_length=1, max_length=1500,
                               description=f"{_EN}. Still frame: action, composition, setting; entity names exactly as declared")
     video_prompt: str = Field(min_length=1, max_length=1500,
-                              description=f"{_EN}. ~8 seconds of motion as prose or timed beats ('0-4s: ... 4-8s: ...'), "
-                                          "then Audio:, SFX: and Negative: lines")
+                              description=f"{_EN}. ~8 seconds as ONE continuous shot in prose, at most 350 "
+                                          "characters, no cut to another shot, no Audio:/SFX:/Negative: lines")
     narration: Optional[str] = Field(None, max_length=600, description=f"{_STORY}. Voice-over, about 8 seconds")
     character_names: list[str] = Field(default_factory=list, max_length=10)
     continues_previous: bool = False
@@ -240,6 +240,7 @@ class AIGeneration(BaseModel):
     video_id: Optional[str] = None
     request_id: str
     attempts: int
+    input: Optional[dict[str, Any]] = Field(None, description="The request that produced it (for a rewrite)")
     output: dict[str, Any]
     created_at: Optional[str] = None
     applied_at: Optional[str] = None

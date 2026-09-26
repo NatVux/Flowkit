@@ -4,11 +4,11 @@ Reference for writing video prompts optimized for Google Veo 3. Veo 3 generates 
 
 ## Prompt Fundamentals
 
-- **Optimal length:** 100–150 words (3–6 sentences)
+- **One continuous shot per 8-second clip** — never `then cut to`, no second shot, no timestamp beats
+- **Length:** at most ~350 characters (2–4 sentences). A long multi-shot prompt (828 characters, "Then cut to") is what Google failed and refunded on 2026-09-26, while one-shot prompts of ~335 characters rendered (see `docs/PIPELINE_RUNNER.md`)
 - **Style:** Natural prose — write like briefing a film director
 - **Camera movement:** Always a **separate sentence** — never embed in action description
-- **Audio:** Always describe at end of prompt with `Audio:`, `SFX:`, `Music:` labels
-- **Negative prompt:** Always append `Negative: subtitles, watermark, text overlay`
+- **Audio and Negative:** leave the `Audio:` / `SFX:` / `Negative:` lines out — the Flow Kit worker appends an Audio line (from the project's `allow_music` / `allow_voice`) and a Negative line when the prompt has none
 
 ### 5-Component Structure
 
@@ -20,9 +20,9 @@ Reference for writing video prompts optimized for Google Veo 3. Veo 3 generates 
 |-----------|------|------|
 | Camera | Shot type, angle, movement | Write as **separate sentence** |
 | Subject | Character, object | Detailed: age, clothing, hair, identifying features |
-| Action | Motion, emotion, dialogue | Can sequence multiple emotions in one prompt |
+| Action | Motion, emotion, dialogue | One continuous action; at most one short line of dialogue |
 | Setting | Location, time, weather | Background + environment + props |
-| Style & Audio | Visual aesthetic + sound | Audio labels at end of prompt, separated |
+| Style | Visual aesthetic + lighting | Audio/Negative lines are added by the worker |
 
 **Critical rule — camera as separate sentence:**
 - Wrong: `A woman walks down the street as the camera dollies in with warm lighting`
@@ -156,7 +156,7 @@ Audio: quiet hum of an office, keyboard typing
 
 ### Audio Placement
 
-Always at the **end** of the prompt, with clear labels:
+In Flow Kit, **leave these lines out**: the worker appends an Audio line and a Negative line when the prompt has none, and they would push the prompt past ~350 characters. For reference, Veo reads them at the **end** of the prompt, with clear labels:
 
 ```
 [Visual description...]
@@ -190,54 +190,22 @@ Music: faint lo-fi jazz in background.
 
 ---
 
-## Multi-Shot Prompting
+## One Continuous Shot
 
-### Method A: Inline Prose (simple, recommended)
-
-Use `then cut to`, `finally` in flowing prose:
+Each 8-second clip is **one shot**. Do not write `then cut to`, `finally`, a reverse shot or timestamp beats — build the emotion with a camera move instead: a slow dolly in toward a face, a crane down onto the subject, a pull back to reveal the setting.
 
 ```
-Wide establishing shot of a rainy city intersection at night,
-neon signs reflecting on wet asphalt. Then cut to medium shot
-of a woman under a red umbrella, waiting at the crosswalk.
-Finally, close-up on her face as she checks her phone,
-expression shifting from worry to relief.
-
-The camera movement is smooth and deliberate. Cinematic,
-desaturated teal and orange color grade.
-
-Audio: rain pattering on pavement, distant traffic.
-SFX: phone notification chime.
-Negative: subtitles, watermark, text overlay.
+Medium shot of a woman under a red umbrella at a rainy crosswalk at night,
+checking her phone, her worry turning to relief. The camera slowly dollies
+in. Neon signs reflecting on wet asphalt, teal and orange grade.
 ```
 
-### Method B: Timestamp Prompting (precise)
+Rules:
 
-Split clip into timed segments:
-
-```
-[00:00–00:02] Medium shot from behind a young explorer as she
-pushes aside a jungle vine, leather satchel visible, messy
-brown ponytail.
-
-[00:02–00:04] Reverse shot of her freckled face, expression
-filled with awe, ancient moss-covered ruins in background.
-
-[00:04–00:06] Tracking shot following her as she steps into
-the clearing, runs her hand over carvings on a crumbling
-stone wall.
-
-SFX: dense leaves rustling, distant exotic bird calls.
-Audio: humid jungle ambience, faint water dripping.
-Negative: subtitles, watermark, text overlay.
-```
-
-### Multi-Shot Rules
-
-1. **2–3 shots optimal** in one 8-second clip — never more
-2. Use **match-action cues** at transitions: `continues turning right` — helps model connect motion between shots
-3. Keep **character description consistent** across all shots (repeat identifying features)
-4. Create a **scene bible**: lock environment, lighting, color grade → copy into every prompt
+1. One subject action from start to end; the camera may move, but never cuts
+2. At most ~350 characters, lighting described, camera move as its own sentence
+3. At most one short line of dialogue: `Name says: "..." (no subtitles)`
+4. Several shots of the same moment = several scenes (use `/fk-insert-scene`)
 
 ---
 
@@ -247,7 +215,7 @@ Since we use reference images via `imageInputs`, **don't describe character appe
 
 However, for Veo 3 specifics:
 - Save establishing shot as Element → reference for subsequent shots
-- First-and-last-frame: define start + end frame → model generates motion between them
+- First-and-last-frame (start + end frame) is not available on the current Flow batch API; every scene renders as its own clip
 - `voice_description` on characters (max ~30 words) — auto-appended to video prompts by the worker
 
 ---
@@ -259,7 +227,7 @@ Veo 3 supports negative prompts — list keywords to exclude (no instructive lan
 - Wrong: `no walls, don't show cars`
 - Right: `Negative: subtitles, watermark, text overlay`
 
-**Standard negative (always include):**
+**Standard negative** (the worker appends one when the prompt has no `Negative:` line — write your own only to add a situational term):
 ```
 Negative: subtitles, captions, watermark, text on screen, logo, blurry faces, distorted hands
 ```
@@ -279,17 +247,9 @@ Negative: subtitles, captions, watermark, text on screen, logo, blurry faces, di
 ## Prompt Template
 
 ```
-[Shot type] of [subject with detailed description], [action/emotion].
-[Camera movement as separate sentence]. [Setting + time of day + weather].
-[Lighting description]. [Style/aesthetic].
-
-[Optional dialogue]: Character says: "..." (no subtitles)
-
-Audio: [ambient sounds].
-SFX: [specific sound effects].
-Music: [background music description].
-
-Negative: subtitles, watermark, text overlay, [other unwanted elements]
+[Shot type] of [subject], [one continuous action/emotion], [setting + time of day].
+[Camera movement as separate sentence]. [Lighting + color].
+[Optional, at most one line]: Character says: "..." (no subtitles)
 ```
 
 ---
@@ -298,47 +258,23 @@ Negative: subtitles, watermark, text overlay, [other unwanted elements]
 
 ### Documentary/Military Scene
 ```
-Medium shot of a soldier in olive fatigues sprinting across a barren
-autumn road, military jeep smoking in the background. The camera tracks
-him with handheld movement, slight shake. Overcast grey sky, cold
-diffused light, breath visible in freezing air. Then cut to close-up
-of his face, determined, sweat and dirt streaking his brow, eyes locked
-on a concrete barrier ahead. Shallow depth of field, dramatic side
-lighting from the overcast sky.
-
-Audio: boots pounding on asphalt, heavy breathing, distant engine rumble.
-SFX: gravel crunching underfoot.
-Negative: subtitles, watermark, text overlay, blurry faces.
+Medium shot of a soldier sprinting across a barren autumn road toward a
+concrete barrier, military jeep smoking behind him. The camera tracks him
+handheld. Overcast grey sky, cold diffused light, breath visible in the air.
 ```
 
 ### Emotional Discovery Scene
 ```
-Over-the-shoulder shot of Luna kneeling at the edge of a chocolate river,
-dipping a paw into the flowing chocolate. Soft diffused golden hour light,
-shallow depth of field. Luna gasps: "What is this place?" (no subtitles)
-Then cut to close-up of her paw lifting chocolate, slow motion drip catching
-the warm backlight. The camera slowly dollies in. Finally, wide crane up
-revealing the vast chocolate landscape behind her, cotton candy clouds
-towering above, arms raised in wonder.
-
-Audio: gentle river flowing, warm breeze through candy trees.
-SFX: chocolate dripping, soft gasp.
-Negative: subtitles, watermark, text overlay.
+Over-the-shoulder shot of Luna kneeling at a chocolate river, dipping a paw
+in. Luna gasps: "What is this place?" (no subtitles) The camera slowly cranes
+up. Soft golden hour light, cotton candy clouds towering above.
 ```
 
-### Action Sequence
+### Action Scene
 ```
 Low angle shot of a hero charging across a castle bridge at dawn, sword
-raised high, golden light catching the blade. The camera tracks alongside
-with handheld energy. Warm golden hour, long shadows on ancient stone.
-Then cut to medium shot as he raises the sword overhead, light bursting
-from the blade, wind whipping his cloak. The camera slowly dollies in.
-Close-up on his face, jaw set with determination, reflected golden glow
-in his eyes, castle gate looming behind.
-
-Audio: wind howling across stone bridge, distant horns.
-SFX: sword ringing, boots on stone, cloak snapping in wind.
-Negative: subtitles, watermark, text overlay, blurry faces.
+raised, light bursting from the blade. The camera tracks alongside. Warm
+golden hour, long shadows on ancient stone, wind whipping his cloak.
 ```
 
 ---
@@ -347,31 +283,29 @@ Negative: subtitles, watermark, text overlay, blurry faces.
 
 Before submitting any video prompt, verify:
 
-- [ ] Prompt is 100–150 words, 3–6 sentences
+- [ ] One continuous shot — no `then cut to`, no timestamp beats
+- [ ] At most ~350 characters, 2–4 sentences
 - [ ] Subject described with detail (age, clothing, hair, features) — unless ref image handles it
 - [ ] Camera movement written as **separate sentence**
 - [ ] Lighting/color temperature described
-- [ ] Audio / SFX / Music labels at end of prompt
-- [ ] Dialogue short (fits in ~8s), uses `:` format or `(no subtitles)`
-- [ ] Multi-shot: max 2–3, with match-action cues at transitions
-- [ ] Character description consistent across multi-prompt sequences
-- [ ] Negative prompt included (at minimum: `subtitles, watermark`)
+- [ ] No Audio / SFX / Negative lines (the worker appends them)
+- [ ] At most one short line of dialogue (fits in ~8s), with `(no subtitles)`
 - [ ] No abstract words — everything is visual/audible and specific
-- [ ] Reference characters appear consistently across shots (action only, not appearance)
+- [ ] Reference characters described by action only, not appearance
 
 ## Common Mistakes
 
 | Wrong | Right |
 |-------|-------|
-| Prompt < 50 words, too generic | 100–150 words, specific per component |
+| Prompt too generic | Specific per component, still under ~350 characters |
+| Several shots joined with `then cut to` | One continuous shot; move the camera instead |
 | Camera movement embedded in action sentence | Camera movement = separate sentence |
 | Dialogue too long for 8s | Keep dialogue short, fits in clip duration |
 | Using `"quotes"` for dialogue → subtitles appear | Use `:` format or add `(no subtitles)` |
-| No audio description → silent or weird audio | Always write `Audio:` / `SFX:` at end |
+| Writing `Audio:` / `SFX:` / `Negative:` lines | Leave them out — the worker appends them |
 | Using `no`, `don't` in negative prompt | List keywords: `subtitles, watermark` |
-| Character changes between shots | Repeat exact identifying features every prompt |
-| More than 3 shots in 8s | Max 2–3 shots per clip |
+| Long prompt (800+ characters) | At most ~350 characters |
 | Missing lighting description | Always include lighting + color temperature |
 | Vague words like `"cinematic"` alone | Specify: `shallow DOF + golden hour + dolly in` |
 | `"Camera zooms"` — too vague | `The camera slowly dollies in.` (separate sentence) |
-| No negative prompt | Always: `Negative: subtitles, watermark, text overlay` |
+| Negative written as instructions (`no text`) | Keywords only, and only to add a situational term |
