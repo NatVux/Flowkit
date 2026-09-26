@@ -24,11 +24,11 @@ def default_story_plan() -> dict[str, Any]:
         ],
         "scenes": [
             {"summary": "Morning setup", "image_prompt": "Pippip arranges fish on ice at Fish Stall, sunrise.",
-             "video_prompt": "0-4s: Pippip lays fish on ice. 4-8s: slow push-in on his proud smile.",
+             "video_prompt": "Pippip lays a fish on the ice and smiles proudly. The camera slowly pushes in. Warm morning light.",
              "narration": "Every morning, Pippip opens his stall before the sun is up.",
              "character_names": ["Pippip", "Fish Stall"], "continues_previous": False},
             {"summary": "The golden fish", "image_prompt": "Pippip stares at a glowing golden fish on the ice at Fish Stall.",
-             "video_prompt": "0-4s: close-up of the golden fish shimmering. 4-8s: Pippip leans in, wide-eyed.",
+             "video_prompt": "Close-up of the golden fish shimmering as Pippip leans in, wide-eyed. The camera holds steady. Soft glow.",
              "narration": "Then one day, something shimmered on the ice.",
              "character_names": ["Pippip", "Fish Stall"], "continues_previous": True},
         ],
