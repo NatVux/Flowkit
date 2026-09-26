@@ -318,6 +318,29 @@ async def test_video_redo_resets_the_status_and_regenerates(world):
     assert (await crud.get_scene(scenes[2]["id"]))["vertical_video_status"] == "PENDING"
 
 
+async def test_a_failed_item_is_redone_while_the_run_is_running(world):
+    """Bà Cụ's reference is still rendering, so the stage stays RUNNING; Mèo Con's failed one
+    is redone in place instead of waiting (no hand edit of the database)."""
+    r, cat, lady = world["runner"], world["ents"]["Mèo Con"]["id"], world["ents"]["Bà Cụ"]["id"]
+    run = await r.create(world["video"]["id"], concat=False)
+    await r.start(run["id"])
+    claimed = await crud.claim_actionable_requests(limit=50)
+    [cat_req] = [q for q in claimed if q["character_id"] == cat]
+    with patch.object(processor, "_dispatch", AsyncMock(return_value={"error": "RpcError: x [PUBLIC_ERROR_UNSAFE_GENERATION]"})):
+        await processor._process_one(cat_req, {}, {})
+    await r.tick(run["id"])
+    st = await r.status(run["id"])
+    assert st["status"] == "RUNNING"  # Bà Cụ still PROCESSING
+    assert by_label(st, "REFS")["Mèo Con"]["status"] == "NEEDS_USER_ACTION"
+
+    with pytest.raises(pc.PipelineConflict, match="SUBMITTED"):  # the one in flight is not redoable
+        await r.redo(run["id"], "character", lady)
+    st = await r.redo(run["id"], "character", cat)
+    item = by_label(st, "REFS")["Mèo Con"]
+    assert st["status"] == "RUNNING" and item["status"] == "SUBMITTED" and item["redo_count"] == 1
+    assert item["request_type"] == "REGENERATE_CHARACTER_IMAGE"
+
+
 async def test_redo_is_refused_while_running(world):
     r = world["runner"]
     run = await r.create(world["video"]["id"], concat=False)

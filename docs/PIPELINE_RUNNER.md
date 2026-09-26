@@ -260,9 +260,12 @@ Status response (abridged):
 
 ### Redo
 
-Only while the run waits for you (`AWAITING_APPROVAL`, `NEEDS_USER_ACTION`,
-`PAUSED`), and only for the current stage. A redo is always explicit; the
-runner never cascades by itself.
+While the run waits for you (`AWAITING_APPROVAL`, `NEEDS_USER_ACTION`,
+`PAUSED`), and only for the current stage. While it is `RUNNING`, an item of
+the current stage that is `FAILED` or `NEEDS_USER_ACTION` can be redone too:
+a stage with other items still in flight never stops for a person, so without
+this the failed item would wait for all of them. A redo is always explicit;
+the runner never cascades by itself.
 
 | Target | Stage | Request | Notes |
 |---|---|---|---|

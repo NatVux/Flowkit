@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 DISCONNECT_GRACE_SECONDS = 60
 IN_FLIGHT = ("PENDING", "PROCESSING")
 DONE_ITEM = ("COMPLETED", "SKIPPED")
+REDOABLE_WHILE_RUNNING = ("FAILED", "NEEDS_USER_ACTION")
 
 
 def _iso(dt: datetime) -> str:
@@ -551,9 +552,19 @@ class PipelineRunner:
                     confirm_invalidates: bool) -> dict:
         """Redo one entity or scene of the current stage. Never automatic: a person asks for it."""
         run = await self._get(run_id)
-        if run["status"] not in ("AWAITING_APPROVAL", "NEEDS_USER_ACTION", "PAUSED"):
+        if run["status"] == "RUNNING":
+            # Other items may still be in flight, so the stage never stops for a person: a failed
+            # item is redone in place, before anything below touches the scene.
+            stage = "VIDEOS" if run["stage"] == "CONCAT" else run["stage"]
+            item = next((i for i in await pc.list_items(run_id, stage) if i["target_id"] == target_id), None)
+            if item is None or item["status"] not in REDOABLE_WHILE_RUNNING:
+                raise pc.PipelineConflict(
+                    f"run is RUNNING; only a {' or '.join(REDOABLE_WHILE_RUNNING)} item of {stage} can be "
+                    f"redone while it runs (this one is {item['status'] if item else 'not in the stage'})")
+        elif run["status"] not in ("AWAITING_APPROVAL", "NEEDS_USER_ACTION", "PAUSED"):
             raise pc.PipelineConflict(f"run is {run['status']}; redo while it waits for you "
-                                      "(AWAITING_APPROVAL, NEEDS_USER_ACTION or PAUSED)")
+                                      "(AWAITING_APPROVAL, NEEDS_USER_ACTION or PAUSED), or redo a failed "
+                                      "item while it is RUNNING")
         self._preflight()
         p = pl.prefix(run["orientation"])
         if target_type == "character":
