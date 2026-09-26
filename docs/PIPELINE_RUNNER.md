@@ -199,6 +199,22 @@ later. The raw batchexecute body is not kept by Flow Kit: `RpcError` holds
   subtitles)`, Audio/SFX/Negative lines and character voices, against 299
   characters for one continuous shot (worker suffixes included).
 
+**Conclusion of the prompt test (2026-09-26): dialogue is not the cause**
+
+The other two scenes were rewritten as one continuous shot of about 335
+characters, no "cut to", no Audio/SFX/Negative lines (the worker adds its own),
+and sent once each on `veo_3_1_i2v_lite`:
+
+| Scene | Prompt | Sent → done | Result |
+|---|---|---|---|
+| 2 | no dialogue, 337 chars (517 with suffixes) | 13:53:30 → 13:54:27 | COMPLETED, op `e442cc31-…`, 8 s 720x1280 + audio |
+| 1 | one line of dialogue from the child character, `Minh whispers: "Hello... who are you?" (no subtitles)`, 333 chars (674 with voices + suffixes) | 13:54:32 → 13:55:29 | COMPLETED, op `2e6326ac-…`, 8 s 720x1280 + audio |
+
+**Dialogue is not the cause; the remaining suspects are the scene cut
+("Then cut to …", several shots in 8 s) and the prompt length.** One sample
+each: not yet proven which of the two, or whether the original failure was
+just Google's.
+
 ## API
 
 | Endpoint | Body | Effect |
@@ -331,3 +347,24 @@ prompt rewriting after a content-filter rejection, and trimming.
 Known and left as is: the worker prunes its in-memory `_deferred` map on the
 next tick, so a "not ready yet" request is retried after one poll interval
 rather than 30 s (harmless, costs a cooldown slot).
+
+## Next time (recorded 2026-09-26, not done yet)
+
+a) **`STORY_SYSTEM`** (`agent/services/ai_content.py`): write each
+   `video_prompt` as **one continuous shot** (no "Then cut to", no second or
+   third shot in 8 s), cap its length (the working prompts were about 335
+   characters before the worker's suffixes), and leave the Audio/SFX/Negative
+   lines to the worker. Dialogue is allowed, one short line with
+   `(no subtitles)` — it was not the cause (see "Mẫu lỗi thật"). Note the
+   worker still appends "no narration, no voiceover" when the project has
+   `allow_voice` off, even to a prompt with dialogue: the two contradict.
+
+b) **Runner:**
+   - Redo a failed item while the run is `RUNNING` (other items still in
+     flight) without editing the database by hand. Today redo needs
+     `AWAITING_APPROVAL` / `NEEDS_USER_ACTION` / `PAUSED`, and a stage with a
+     `SUBMITTED` item never leaves `RUNNING`; redo from `PAUSED` also releases
+     every held request of the run.
+   - `generations_spent` should not count an attempt whose credit Flow
+     refunded, if that can be recognised (refund + `as29s` NOT_FOUND + the
+     operation leaving the listing). Run `dcae218e` reports 4 for 3 billed.
