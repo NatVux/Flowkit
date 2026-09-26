@@ -469,3 +469,31 @@ class TestPollDiagnosis:
         result = await self._poll(monkeypatch, [{"operation": {}, "status": "MEDIA_GENERATION_STATUS_FAILED",
                                                  "error": "operation carried no name"}])
         assert result["error"] == "Operation failed: ?: operation carried no name"
+
+
+class TestVideoPromptAudioSuffix:
+    """allow_voice is about a narrator; it must not forbid a character's line in the prompt."""
+
+    async def _build(self, prompt, *, allow_voice=False, allow_music=False):
+        project = {"id": PROJECT_ID, "allow_voice": allow_voice, "allow_music": allow_music}
+        with patch.object(ops_module.crud, "get_project", AsyncMock(return_value=project)), \
+             patch.object(ops_module.crud, "get_project_characters", AsyncMock(return_value=[])):
+            return await ops_module._build_video_prompt(prompt, {"character_names": []}, PROJECT_ID)
+
+    async def test_dialogue_without_voice_keeps_the_line_and_bans_only_a_narrator(self):
+        out = await self._build('Minh whispers: "Hello?" (no subtitles) The camera pushes in.')
+        assert "Audio: natural ambient sounds and the character dialogue, no background music, " \
+               "no narrator voiceover." in out
+        assert "sounds only" not in out and "no narration" not in out
+
+    async def test_no_dialogue_without_voice_is_ambient_only_and_no_narrator(self):
+        out = await self._build("The boy looks up at the glowing tree. The camera tilts up.")
+        assert "Audio: natural ambient sounds only, no background music, no narrator voiceover." in out
+
+    async def test_voice_allowed_keeps_dialogue(self):
+        out = await self._build("The boy looks up.", allow_voice=True)
+        assert "Audio: no background music. Keep character dialogue and natural ambient sounds." in out
+
+    async def test_a_prompt_with_its_own_audio_line_gets_no_second_one(self):
+        out = await self._build("The boy looks up.\n\nAudio: crickets.")
+        assert out.count("Audio:") == 1

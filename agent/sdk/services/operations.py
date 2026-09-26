@@ -980,8 +980,12 @@ async def _build_video_prompt(base_prompt: str, scene: dict, project_id: str | N
         if "audio:" not in prompt_lower and "music:" not in prompt_lower:
             if allow_voice:
                 parts.append("Audio: no background music. Keep character dialogue and natural ambient sounds.")
+            elif has_dialogue:
+                # allow_voice is about a narrator: a character's line in the prompt still has to be spoken.
+                parts.append("Audio: natural ambient sounds and the character dialogue, no background music, "
+                             "no narrator voiceover.")
             else:
-                parts.append("Audio: natural ambient sounds only, no background music, no narration, no voiceover.")
+                parts.append("Audio: natural ambient sounds only, no background music, no narrator voiceover.")
 
     # Veo 3 negative prompt — always append unless already present
     if "negative:" not in prompt_lower:
