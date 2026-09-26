@@ -694,6 +694,25 @@ async def list_ai_generations(project_id: str) -> list[dict]:
     return [_ai_generation_row(r) for r in await cur.fetchall()]
 
 
+async def update_ai_generation_output(gid: str, operation: str, output_data: dict) -> dict:
+    """Replace a not-yet-applied generation's output (an edit made before apply)."""
+    db = await get_db()
+    async with schema._db_lock:
+        async with transaction(db):
+            cur = await db.execute("SELECT operation, status FROM ai_generation WHERE id=?", (gid,))
+            gen = await cur.fetchone()
+            if gen is None:
+                raise LookupError("AI generation not found")
+            if gen[0] != operation:
+                raise AIGenerationConflict(f"generation is {gen[0]}, not {operation}")
+            if gen[1] != "GENERATED":
+                raise AIGenerationConflict("generation was already applied")
+            await db.execute(
+                "UPDATE ai_generation SET output_json=?, updated_at=? WHERE id=? AND status='GENERATED'",
+                (json.dumps(output_data), _now(), gid))
+    return await get_ai_generation(gid)
+
+
 async def _claim_generation(db, gid: str, operation: str, video_id: str, now: str) -> dict:
     cur = await db.execute("SELECT operation, status, project_id FROM ai_generation WHERE id=?", (gid,))
     gen = await cur.fetchone()

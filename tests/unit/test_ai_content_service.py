@@ -788,6 +788,58 @@ class TestRoutes:
         assert r.status_code == status
         assert r.json()["error"]["details"]["request_id"]
 
+    async def _generated(self, api, project):
+        registry.set_ai_provider(MockAIProvider([_vi_plan()]))
+        r = await api.post("/api/ai/story-plan", json={"project_id": project["id"], "brief": "cat", "scene_count": 3})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    async def test_an_edited_plan_is_saved_and_applied(self, api, project_video):
+        project, video = project_video
+        gen = await self._generated(api, project)
+        assert gen["input"]["brief"] == "cat"  # kept for a rewrite
+        plan = gen["output"]
+        plan["title"] = "Đốm về nhà"
+        plan["scenes"][0]["narration"] = "Đốm tìm thấy đường về."
+        plan["scenes"][1]["video_prompt"] = "Mèo Đốm walks home under the lanterns. The camera tracks alongside."
+        r = await api.put(f"/api/ai/generations/{gen['id']}", json=plan)
+        assert r.status_code == 200, r.text
+        assert r.json()["output"]["title"] == "Đốm về nhà" and r.json()["status"] == "GENERATED"
+        r = await api.post(f"/api/ai/generations/{gen['id']}/apply", json={"video_id": video["id"]})
+        assert r.status_code == 200, r.text
+        scenes = await crud.list_scenes(video["id"])
+        assert scenes[0]["narrator_text"] == "Đốm tìm thấy đường về."
+        assert scenes[1]["video_prompt"] == plan["scenes"][1]["video_prompt"]
+
+    @pytest.mark.parametrize("edit, loc, msg", [
+        (lambda p: p["scenes"][1].update(video_prompt="Mèo Đốm nhìn quanh chợ đêm đông đúc và lo lắng."),
+         "scenes.1.video_prompt", "accented"),
+        (lambda p: p["scenes"][0].update(video_prompt="Mèo Đốm looks up. Then cut to the lanterns."),
+         "scenes.0.video_prompt", "cuts to another shot"),
+        (lambda p: p["scenes"][2].update(video_prompt="Mèo Đốm walks past the stalls. " * 15),
+         "scenes.2.video_prompt", "chars"),
+        (lambda p: p["scenes"][0].update(character_names=["Ai Đó"]), "plan", "undefined entities"),
+        (lambda p: p.update(title=""), "title", "at least 1 character"),
+    ])
+    async def test_an_invalid_edit_is_refused_with_its_problems(self, api, project_video, edit, loc, msg):
+        project, _ = project_video
+        gen = await self._generated(api, project)
+        plan = json.loads(json.dumps(gen["output"]))
+        edit(plan)
+        r = await api.put(f"/api/ai/generations/{gen['id']}", json=plan)
+        assert r.status_code == 422, r.text
+        problems = r.json()["error"]["details"]["problems"]
+        assert any(p["loc"] == loc and msg in p["msg"] for p in problems), problems
+        # nothing was saved
+        assert (await api.get(f"/api/ai/generations/{gen['id']}")).json()["output"] == gen["output"]
+
+    async def test_an_applied_plan_cannot_be_edited(self, api, project_video):
+        project, video = project_video
+        gen = await self._generated(api, project)
+        await api.post(f"/api/ai/generations/{gen['id']}/apply", json={"video_id": video["id"]})
+        r = await api.put(f"/api/ai/generations/{gen['id']}", json=gen["output"])
+        assert r.status_code == 409
+
     async def test_unknown_generation_is_404(self, api):
         registry.set_ai_provider(MockAIProvider())
         assert (await api.get("/api/ai/generations/nope")).status_code == 404

@@ -106,7 +106,7 @@
             "type": "string"
           },
           "video_prompt": {
-            "description": "ENGLISH. ~8 seconds of motion as prose or timed beats ('0-4s: ... 4-8s: ...'), then Audio:, SFX: and Negative: lines",
+            "description": "ENGLISH. ~8 seconds as ONE continuous shot in prose, at most 350 characters, no cut to another shot, no Audio:/SFX:/Negative: lines",
             "maxLength": 1500,
             "minLength": 1,
             "type": "string"

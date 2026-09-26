@@ -1,5 +1,7 @@
 """AI content planning endpoints. Thin: all logic lives in AIContentService."""
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 
 from agent.api.validation import validate_id
@@ -11,7 +13,7 @@ from agent.services.ai import (
     AIContentBlockedError, AINotConfiguredError, AIPartialResponseError, AIProviderError,
     AIRateLimitError, AITimeoutError, provider_status,
 )
-from agent.services.ai_content import AIContentUnavailable, get_ai_content_service
+from agent.services.ai_content import AIContentUnavailable, PlanValidationError, get_ai_content_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -23,6 +25,8 @@ def _http_error(exc: Exception) -> HTTPException:
         return HTTPException(404, str(exc))
     if isinstance(exc, crud.AIGenerationConflict):
         return HTTPException(409, str(exc))
+    if isinstance(exc, PlanValidationError):
+        return HTTPException(422, {"message": "the edited plan failed validation", "problems": exc.problems})
     if isinstance(exc, ValueError):
         return HTTPException(400, str(exc))
     if isinstance(exc, AIProviderError):
@@ -75,6 +79,17 @@ async def get_generation(generation_id: str):
     if not gen:
         raise HTTPException(404, "AI generation not found")
     return gen
+
+
+@router.put("/generations/{generation_id}", response_model=AIGeneration)
+async def update_generation(generation_id: str, body: dict[str, Any]):
+    """Save edits to a story plan before it is applied. Same validation as model output
+    (StoryPlan + English prompts + one continuous shot); 422 lists each problem as {loc, msg}."""
+    validate_id(generation_id, "generation_id")
+    try:
+        return await get_ai_content_service().update_story_plan(generation_id, body)
+    except Exception as exc:  # noqa: BLE001
+        raise _http_error(exc) from exc
 
 
 @router.post("/generations/{generation_id}/apply", response_model=ApplyResult)
