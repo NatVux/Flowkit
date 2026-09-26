@@ -289,6 +289,18 @@ export default function StoryPage() {
       {applied && run?.status === 'DRAFT' && (
         <EstimateBox run={run} onStarted={started => navigate(`/chay/${started.id}`)} />
       )}
+      {applied && !runId && gen.video_id && (
+        <Panel className="flex flex-col items-start gap-2">
+          <p className="text-sm">{t('story.noRun')}</p>
+          <ActionButton onClick={async () => {
+            try {
+              const created = await api.createRun(gen.video_id!)
+              setRun(created)
+              setRunId(created.id)
+            } catch (err) { setError(describeError(t, err)) }
+          }}>{t('story.makeEstimate')}</ActionButton>
+        </Panel>
+      )}
       {applied && runId && run?.status !== 'DRAFT' && (
         <div><Link to={`/chay/${runId}`} className="text-sm underline" style={{ color: 'var(--accent)' }}>{t('story.openRun')}</Link></div>
       )}

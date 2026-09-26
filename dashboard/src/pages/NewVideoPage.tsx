@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { api } from '../api/flowkit'
 import { useSystemStatus } from '../api/SystemStatus'
@@ -21,6 +21,7 @@ export default function NewVideoPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const system = useSystemStatus()
+  const [params] = useSearchParams()
 
   const [materials, setMaterials] = useState<Material[]>([])
   const [idea, setIdea] = useState('')
@@ -35,6 +36,20 @@ export default function NewVideoPage() {
   const [error, setError] = useState<string | null>(null)
   // Kept after a failure so "Thử lại" does not create a second Flow project.
   const [created, setCreated] = useState<{ projectId: string; videoId?: string } | null>(null)
+
+  // ?du-an=<id>: a draft project from "Video của tôi" that has no story yet. Write one for it
+  // instead of creating another Flow project.
+  const draftId = params.get('du-an')
+  useEffect(() => {
+    if (!draftId) return
+    Promise.all([api.project(draftId), api.videos(draftId)]).then(([project, videos]) => {
+      setIdea(prev => prev || project.name)
+      setLanguage(project.language || 'vi')
+      setMaterial(project.material)
+      if (videos[0]) setOrientation((videos[0] as { orientation?: 'VERTICAL' | 'HORIZONTAL' }).orientation ?? 'VERTICAL')
+      setCreated({ projectId: project.id, videoId: videos[0]?.id })
+    }).catch(err => setError(describeError(t, err)))
+  }, [draftId, t])
 
   useEffect(() => {
     api.materials().then(ms => {

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, NavLink, Routes, Route, useLocation, useParams, useSearchParams } from 'react-router-dom'
-import { LayoutDashboard, FolderOpen, Film, ScrollText, BookOpen, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { LayoutDashboard, FolderOpen, Film, ScrollText, BookOpen, SlidersHorizontal, Sparkles, Clapperboard } from 'lucide-react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { WebSocketProvider } from './api/WebSocketContext'
 import { SystemStatusProvider } from './api/SystemStatus'
@@ -21,14 +21,23 @@ import SettingsPage from './pages/SettingsPage'
 import NewVideoPage from './pages/NewVideoPage'
 import StoryPage from './pages/StoryPage'
 import RunPage from './pages/RunPage'
+import MyVideosPage from './pages/MyVideosPage'
 
-const NAV: { to: string; icon: typeof LayoutDashboard; labelKey: TranslationKey; exact: boolean }[] = [
+type NavItem = { to: string; icon: typeof LayoutDashboard; labelKey: TranslationKey; exact: boolean }
+
+// Everyday use: make a video, find it again, read the guide.
+const NAV: NavItem[] = [
   { to: '/tao-moi', icon: Sparkles, labelKey: 'nav.newVideo', exact: false },
-  { to: '/', icon: LayoutDashboard, labelKey: 'nav.dashboard', exact: true },
+  { to: '/', icon: Clapperboard, labelKey: 'nav.myVideos', exact: true },
+  { to: '/guide', icon: BookOpen, labelKey: 'nav.guide', exact: false },
+]
+
+// Technical tools (the project pages hold the old Pipeline tab, which sends requests on its own).
+const NAV_ADVANCED: NavItem[] = [
+  { to: '/tong-quan', icon: LayoutDashboard, labelKey: 'nav.dashboard', exact: false },
   { to: '/projects', icon: FolderOpen, labelKey: 'nav.projects', exact: false },
   { to: '/gallery', icon: Film, labelKey: 'nav.gallery', exact: false },
   { to: '/logs', icon: ScrollText, labelKey: 'nav.logs', exact: false },
-  { to: '/guide', icon: BookOpen, labelKey: 'nav.guide', exact: false },
   { to: '/settings', icon: SlidersHorizontal, labelKey: 'nav.settings', exact: false },
 ]
 
@@ -61,7 +70,8 @@ function useBreadcrumbs() {
   }, [id])
 
   const crumbs: string[] = []
-  if (loc.pathname === '/') crumbs.push(t('app.breadcrumb.dashboard'))
+  if (loc.pathname === '/') crumbs.push(t('app.breadcrumb.myVideos'))
+  else if (loc.pathname.startsWith('/tong-quan')) crumbs.push(t('app.breadcrumb.dashboard'))
   else if (loc.pathname.startsWith('/tao-moi')) crumbs.push(t('app.breadcrumb.newVideo'))
   else if (loc.pathname.startsWith('/truyen')) crumbs.push(t('app.breadcrumb.story'))
   else if (loc.pathname.startsWith('/chay')) crumbs.push(t('app.breadcrumb.run'))
@@ -97,8 +107,33 @@ function LanguageSwitcher() {
   )
 }
 
+function NavItems({ items }: { items: NavItem[] }) {
+  const { t } = useTranslation()
+  return (
+    <>
+      {items.map(({ to, icon: Icon, labelKey, exact }) => (
+        <NavLink
+          key={to}
+          to={to}
+          end={exact}
+          className="flex items-center gap-2.5 px-2.5 py-2 rounded text-xs transition-colors hover:opacity-90"
+          style={({ isActive }) => ({
+            background: isActive ? 'var(--card)' : 'transparent',
+            color: isActive ? 'var(--text)' : 'var(--muted)',
+            borderLeft: `2px solid ${isActive ? 'var(--accent)' : 'transparent'}`,
+          })}
+        >
+          <Icon size={13} />
+          {t(labelKey)}
+        </NavLink>
+      ))}
+    </>
+  )
+}
+
 function Sidebar() {
   const { t } = useTranslation()
+  const loc = useLocation()
   const { worker } = useWebSocketContext()
   const [health, setHealth] = useState<{ extension_connected: boolean } | null>(null)
 
@@ -117,22 +152,15 @@ function Sidebar() {
       </div>
 
       <nav className="flex flex-col gap-0.5 px-2.5 py-3">
-        {NAV.map(({ to, icon: Icon, labelKey, exact }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={exact}
-            className="flex items-center gap-2.5 px-2.5 py-2 rounded text-xs transition-colors hover:opacity-90"
-            style={({ isActive }) => ({
-              background: isActive ? 'var(--card)' : 'transparent',
-              color: isActive ? 'var(--text)' : 'var(--muted)',
-              borderLeft: `2px solid ${isActive ? 'var(--accent)' : 'transparent'}`,
-            })}
-          >
-            <Icon size={13} />
-            {t(labelKey)}
-          </NavLink>
-        ))}
+        <NavItems items={NAV} />
+        <details className="mt-3" open={NAV_ADVANCED.some(n => loc.pathname.startsWith(n.to))}>
+          <summary className="px-2.5 py-1.5 text-[10px] tracking-widest uppercase cursor-pointer select-none" style={{ color: 'var(--muted)' }}>
+            {t('nav.advanced')}
+          </summary>
+          <div className="flex flex-col gap-0.5 mt-0.5">
+            <NavItems items={NAV_ADVANCED} />
+          </div>
+        </details>
       </nav>
 
       <div className="mt-auto px-4 py-3.5 border-t flex flex-col gap-2.5" style={{ borderColor: 'var(--border)' }}>
@@ -194,7 +222,8 @@ function Layout() {
         <StatusBar />
         <main className="flex-1 overflow-auto p-5">
           <Routes>
-            <Route path="/" element={<DashboardPage />} />
+            <Route path="/" element={<MyVideosPage />} />
+            <Route path="/tong-quan" element={<DashboardPage />} />
             <Route path="/tao-moi" element={<NewVideoPage />} />
             <Route path="/truyen/:id" element={<StoryPage />} />
             <Route path="/chay/:id" element={<RunPage />} />
