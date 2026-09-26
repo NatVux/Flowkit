@@ -74,6 +74,27 @@ class TestContentPolicyCodes:
         assert row["status"] == "PENDING" and row["retry_count"] == 1
 
 
+class TestModelAccessDenied:
+    # Verbatim from a real video submit (docs/PIPELINE_RUNNER.md, "Mẫu lỗi thật").
+    REAL = ("RpcError: eb1hJf failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', "
+            "['PUBLIC_ERROR_MODEL_ACCESS_DENIED']]]]")
+
+    async def test_real_error_fails_at_once_without_retry(self, db):
+        req, scene = await _claimed("GENERATE_VIDEO", vertical_image_media_id=IMAGE_ID,
+                                    vertical_image_status="COMPLETED")
+        await processor._handle_failure(req["id"], req, {"error": self.REAL})
+        row = await crud.get_request(req["id"])
+        assert row["status"] == "FAILED" and row["retry_count"] == 0
+        assert row["error_message"] == self.REAL
+        assert (await crud.get_scene(scene["id"]))["vertical_video_status"] == "FAILED"
+
+    @pytest.mark.parametrize("error", ["model access denied", "MODEL_ACCESS_DENIED",
+                                       "public_error_model_access_denied"])
+    def test_loose_wording_is_not_the_code(self, error):
+        assert processor.model_access_denied(error) is False
+        assert processor._is_retryable_error(error)
+
+
 # ─── W2: orphaned PROCESSING rows at startup ────────────────
 
 class FakeVideoClient:

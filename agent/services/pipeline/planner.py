@@ -12,7 +12,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from agent.worker.processor import content_policy_code
+from agent.worker.processor import content_policy_code, model_access_denied
 
 STAGES = ("REFS", "IMAGES", "VIDEOS", "CONCAT")
 CREDIT_STAGES = ("REFS", "IMAGES", "VIDEOS")
@@ -175,6 +175,10 @@ def classify_failed_request(request: dict) -> FailureClass:
     if policy:
         return FailureClass("USER", policy.removeprefix("PUBLIC_ERROR_"),
                             "Rejected by the content filter: change the prompt (or the references), then redo.")
+    if model_access_denied(error):
+        return FailureClass("USER", "MODEL_ACCESS_DENIED",
+                            "Model video không khả dụng với gói tài khoản (PUBLIC_ERROR_MODEL_ACCESS_DENIED). "
+                            "Change the model (/fk-change-model), then redo.")
     if "public_error_unusual_activity" in lower or "unusual activity" in lower:
         return FailureClass("PAUSE", "UNUSUAL_ACTIVITY",
                             "Google flagged the session. Check the Flow tab, then resume.")

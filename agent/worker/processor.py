@@ -503,6 +503,10 @@ def _retry_at(delay_seconds: int) -> str:
 #: is another paid generation. Matched as exact codes only, never loose wording.
 _CONTENT_POLICY_CODE = re.compile(r"\bPUBLIC_ERROR_(?:UNSAFE_GENERATION|MINOR_INPUT_IMAGE)\b")
 
+#: The account's plan cannot use the requested model: every retry gets the same answer
+#: until the model is changed. Exact code only.
+_MODEL_ACCESS_CODE = re.compile(r"\bPUBLIC_ERROR_MODEL_ACCESS_DENIED\b")
+
 #: Re-uploading media for a "not found" error is capped per request, so a job that keeps
 #: coming back not-found fails clearly instead of cycling forever.
 MAX_NOT_FOUND_RECOVERIES = 2
@@ -521,8 +525,13 @@ def content_policy_code(error: str) -> str | None:
     return match.group(0) if match else None
 
 
+def model_access_denied(error: str) -> bool:
+    """True if Flow refused the model for this account (PUBLIC_ERROR_MODEL_ACCESS_DENIED)."""
+    return bool(_MODEL_ACCESS_CODE.search(error or ""))
+
+
 def _is_retryable_error(error: str) -> bool:
-    if content_policy_code(error):
+    if content_policy_code(error) or model_access_denied(error):
         return False
     permanent_markers = (
         "unsupported_on_batch_api", "no_flow_project", "invalid request",

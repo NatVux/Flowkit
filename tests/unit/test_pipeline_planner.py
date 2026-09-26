@@ -97,12 +97,19 @@ class TestFailures:
         ("bad input PUBLIC_ERROR_MINOR_INPUT_IMAGE", "USER", "MINOR_INPUT_IMAGE"),
         ("FlowBatchError: ogiZ0b: PUBLIC_ERROR_UNUSUAL_ACTIVITY local cooldown active", "PAUSE", "UNUSUAL_ACTIVITY"),
         ("UNSUPPORTED_ON_BATCH_API: start+end-frame chaining", "USER", "UNSUPPORTED_ON_BATCH_API"),
+        ("RpcError: eb1hJf failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', "
+         "['PUBLIC_ERROR_MODEL_ACCESS_DENIED']]]]", "USER", "MODEL_ACCESS_DENIED"),
+        ("model access denied", "USER", "FAILED_AFTER_RETRIES"),
         ("not found after 2 media re-upload recoveries: x", "USER", "MEDIA_NOT_FOUND"),
         ("Internal error encountered", "USER", "FAILED_AFTER_RETRIES"),
     ])
     def test_classes(self, error, action, code):
         got = pl.classify_failed_request({"error_message": error})
         assert (got.action, got.code) == (action, code)
+
+    def test_model_access_denied_says_why(self):
+        got = pl.classify_failed_request({"error_message": "x ['PUBLIC_ERROR_MODEL_ACCESS_DENIED'] y"})
+        assert got.message.startswith("Model video không khả dụng với gói tài khoản")
 
     @pytest.mark.parametrize("req, spent", [
         (None, 0),
