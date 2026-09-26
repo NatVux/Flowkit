@@ -106,6 +106,37 @@ failed: <name>", whose complaint text is not kept), it is **not**: the worker
 retries it like any error and the item ends `FAILED_AFTER_RETRIES`. Capture a
 real rejection before adding a rule for it.
 
+### Mẫu lỗi thật
+
+Errors seen on real runs, copied verbatim, so recognition rules can be added
+later. The raw batchexecute body is not kept by Flow Kit: `RpcError` holds
+`repr()` of the error slot, which is the rawest form available.
+
+**`PUBLIC_ERROR_MODEL_ACCESS_DENIED` — video submit (2026-09-26)**
+
+- Run `dcae218e-cd9c-43e4-af2d-15ef030794e4`, video `c2fea6d6-…`, project
+  `6130c05e-…`, stage VIDEOS, `GENERATE_VIDEO` (i2v, VERTICAL), tier
+  `PAYGATE_TIER_TWO`, model map `frame_2_video` portrait →
+  `veo_3_1_i2v_lite_low_priority`.
+- Batch call itself: HTTP 200 from the extension callback; the error is in the
+  RPC slot. No Flow operation was created (rejected at submit).
+- Stored `request.error_message`, identical for all 3 scenes and all 4 attempts:
+
+  ```
+  RpcError: eb1hJf failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_MODEL_ACCESS_DENIED']]]]
+  ```
+
+- Log line (`agent.sdk.services.operations`):
+
+  ```
+  [ERROR] agent.sdk.services.operations [DEBUG] Video gen submit_result IS_ERROR: {'status': 502, 'error': "RpcError: eb1hJf failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_MODEL_ACCESS_DENIED']]]]"}
+  ```
+
+- Not recognised today: `_is_retryable_error` matches `"permission denied"`,
+  not `ACCESS_DENIED`, so the worker scheduled it as `retryable_error`
+  (`reason: "retryable_error"`). A retry cannot fix it — it is a model/tier
+  permission answer — so it should fail once, like `UNSUPPORTED_ON_BATCH_API`.
+
 ## API
 
 | Endpoint | Body | Effect |
