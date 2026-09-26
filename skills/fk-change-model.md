@@ -72,7 +72,7 @@ If no specific model key was provided as argument, present an `AskUserQuestion` 
 
 **For video model:**
 Use `AskUserQuestion` with options:
-- label: "VEO 3.1 Lite Low Priority (Recommended for free runs)", description: "0 credits · slower queue · works on every tier including SERVICE_TIER_ADVANCED"
+- label: "VEO 3.1 Lite Low Priority (Recommended for free runs)", description: "0 credits · slower queue · works on SERVICE_TIER_ADVANCED · MODEL_ACCESS_DENIED on Google AI Plus (use VEO 3.1 Lite)"
 - label: "VEO 3.1 Lite", description: "Lower quality · fastest · ~5 credits/video · no r2v support"
 - label: "VEO 3.1 Fast Ultra", description: "High quality · fast queue · ~10 credits/video"
 - label: "VEO 3.1 Low Priority leaving", description: "Same ultra quality · slower queue · 0 credits but requires SERVICE_TIER_ULTRA (silent fail on ADVANCED)"
@@ -167,7 +167,7 @@ These are model keys observed on Google Flow (may change as Google updates):
 | Key | Description | Quality | Speed | Cost | Tier req. |
 |-----|-------------|---------|-------|------|-----------|
 | `veo_3_1_i2v_lite` | **VEO 3.1 Lite** — lightweight, fast | Lower | Fastest | ~5 credits | any |
-| `veo_3_1_i2v_lite_low_priority` | **VEO 3.1 Lite Low Priority** — TRUE 0-credit, no headroom required | Lower | Slow | 0 | any (incl. ADVANCED) |
+| `veo_3_1_i2v_lite_low_priority` | **VEO 3.1 Lite Low Priority** — TRUE 0-credit, no headroom required. **Returns `PUBLIC_ERROR_MODEL_ACCESS_DENIED` on Google AI Plus** (seen 2026-09-26, tier reported as `PAYGATE_TIER_TWO`): use `veo_3_1_i2v_lite` there | Lower | Slow | 0 | any (incl. ADVANCED) — **not Google AI Plus** |
 | `veo_3_1_i2v_s_fast` | Veo 3.1 i2v, TIER_ONE | Standard | Fast | paid | TIER_ONE |
 | `veo_3_1_i2v_s_fast_portrait` | Veo 3.1 i2v portrait, TIER_ONE | Standard | Fast | paid | TIER_ONE |
 | `veo_3_1_i2v_s_fast_ultra` | Veo 3.1 i2v, TIER_TWO (ultra) | High | Fast | ~10 credits | TIER_TWO |
