@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, NavLink, Routes, Route, useLocation, useParams, useSearchParams } from 'react-router-dom'
-import { LayoutDashboard, FolderOpen, Film, ScrollText, BookOpen, SlidersHorizontal } from 'lucide-react'
+import { LayoutDashboard, FolderOpen, Film, ScrollText, BookOpen, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { WebSocketProvider } from './api/WebSocketContext'
 import { SystemStatusProvider } from './api/SystemStatus'
@@ -18,8 +18,10 @@ import LogsPage from './pages/LogsPage'
 import GalleryPage from './pages/GalleryPage'
 import GuidePage from './pages/GuidePage'
 import SettingsPage from './pages/SettingsPage'
+import NewVideoPage from './pages/NewVideoPage'
 
 const NAV: { to: string; icon: typeof LayoutDashboard; labelKey: TranslationKey; exact: boolean }[] = [
+  { to: '/tao-moi', icon: Sparkles, labelKey: 'nav.newVideo', exact: false },
   { to: '/', icon: LayoutDashboard, labelKey: 'nav.dashboard', exact: true },
   { to: '/projects', icon: FolderOpen, labelKey: 'nav.projects', exact: false },
   { to: '/gallery', icon: Film, labelKey: 'nav.gallery', exact: false },
@@ -58,6 +60,7 @@ function useBreadcrumbs() {
 
   const crumbs: string[] = []
   if (loc.pathname === '/') crumbs.push(t('app.breadcrumb.dashboard'))
+  else if (loc.pathname.startsWith('/tao-moi')) crumbs.push(t('app.breadcrumb.newVideo'))
   else if (loc.pathname.startsWith('/projects')) {
     crumbs.push(t('app.breadcrumb.projects'))
     if (id) {
@@ -188,6 +191,7 @@ function Layout() {
         <main className="flex-1 overflow-auto p-5">
           <Routes>
             <Route path="/" element={<DashboardPage />} />
+            <Route path="/tao-moi" element={<NewVideoPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/projects/:id" element={<ProjectsPage />} />
             <Route path="/gallery" element={<GalleryPage />} />
