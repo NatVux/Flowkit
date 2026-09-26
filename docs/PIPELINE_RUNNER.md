@@ -370,5 +370,4 @@ rather than 30 s (harmless, costs a cooldown slot).
 - **`generations_spent`** stays a count of generations sent; the response
   and this page say it is not the credit charged (refunds are not detected).
 
-Still open: the `/fk-create-project` and `/fk-camera-guide` skills still teach
-2-3 shots joined with "then cut to" for hand-written video prompts.
+The `/fk-create-project` and `/fk-camera-guide` skills teach the same rule for hand-written video prompts.
