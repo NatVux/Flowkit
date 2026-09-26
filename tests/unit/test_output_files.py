@@ -54,12 +54,17 @@ class TestGetFile:
         assert r.status_code == 200 and r.content == b"clip"
 
     @pytest.mark.parametrize("path", [
-        "/files/../secret.txt", "/files/%2E%2E/secret.txt", "/files/khu_rung_anh_sang/..%2F..%2Fsecret.txt",
+        "/files/%2E%2E/secret.txt", "/files/..%5Csecret.txt", "/files/khu_rung_anh_sang/..%2F..%2Fsecret.txt",
         "/files/khu_rung_anh_sang", "/files/khu_rung_anh_sang/", "/files/", "/files/nope.mp4",
     ])
     async def test_no_escape_no_listing(self, api, path):
         r = await api.get(path)
         assert r.status_code == 404
+        assert b"outside" not in r.content
+
+    async def test_a_dot_dot_the_client_normalises_never_reaches_the_file(self, api):
+        # httpx turns /files/../secret.txt into /secret.txt: no longer a /files path at all
+        r = await api.get("/files/../secret.txt")
         assert b"outside" not in r.content
 
     async def test_only_get(self, api):

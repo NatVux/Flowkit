@@ -31,6 +31,7 @@ from agent.api.active_project import router as active_project_router
 from agent.api.ai import router as ai_router
 from agent.api.pipeline import router as pipeline_router
 from agent.api.files import files_router, system_router
+from agent.api.dashboard_app import router as dashboard_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -354,6 +355,9 @@ async def dashboard_ws(websocket: WebSocket):
     finally:
         event_bus.unsubscribe(q)
 
+
+# Last: the dashboard answers every GET no route above claimed (API paths keep their 404s).
+app.include_router(dashboard_router)
 
 if __name__ == "__main__":
     import os
