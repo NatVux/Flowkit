@@ -136,6 +136,46 @@ later. The raw batchexecute body is not kept by Flow Kit: `RpcError` holds
   not `ACCESS_DENIED`, so the worker scheduled it as `retryable_error`
   (`reason: "retryable_error"`). A retry cannot fix it — it is a model/tier
   permission answer — so it should fail once, like `UNSUPPORTED_ON_BATCH_API`.
+  (Done since: exact-code match, `MODEL_ACCESS_DENIED` → `NEEDS_USER_ACTION`.)
+
+**Video accepted, then failed at Google and refunded — no reason given (2026-09-26)**
+
+- Same run, scene 0 (`a5cadbc8…`), model `veo_3_1_i2v_lite`. Submit accepted
+  at 12:59:43, operation `09d7b8fb-10b5-43f9-8bde-52feb3e14490`. Flow credit
+  history (seen by the user): **−10 at 12:59:38, +10 refunded at 13:00:15**.
+- Polls up to 13:00:06 raised nothing. From 13:00:16 (one second after the
+  refund) the listing held a media id for the operation, and every media
+  lookup on it failed:
+
+  ```
+  [WARNING] agent.services.flow_client Operation 09d7b8fb-10b5-43f9-8 poll failed: as29s failed: [5]
+  ```
+
+  (`[5]` = gRPC NOT_FOUND), every 10 s until the 420 s poll timeout.
+- After a server restart (cache empty), the operation record itself, verbatim
+  `jwpduf` payload:
+
+  ```
+  [null, 250, [["09d7b8fb-10b5-43f9-8bde-52feb3e14490", null, null, null, null, [null, null, null, null, null, null, null, null, [4, [null, "Media not found."], ["Media not found."]]]]]]
+  ```
+
+  No project id, no status (a `CAE` done status never came), outcome code `4`
+  with "Media not found." and no `ErrorInfo` reason. The operation was also
+  **gone from the project listing** (no entry for it any more).
+- Stored `request.error_message` after the second 420 s poll:
+
+  ```
+  Polling timeout after 420s: Media not found.
+  ```
+
+- Flow gives no reason on this path — not unsafe content, not a minor, not a
+  model code. What distinguishes it from a slow job is only circumstantial:
+  the refund, `as29s` NOT_FOUND on the listed media id, then the operation
+  vanishing from the listing. The worker treats it as a poll timeout: it
+  re-polls the stored operation (no second submit, no credit) up to
+  `MAX_RETRIES`, then the item ends `FAILED_AFTER_RETRIES`. Since `f8ecf59`
+  the record is logged and the timeout message carries outcome, poll error and
+  media id. No failure rule yet — one capture only.
 
 ## API
 
