@@ -177,6 +177,28 @@ later. The raw batchexecute body is not kept by Flow Kit: `RpcError` holds
   the record is logged and the timeout message carries outcome, poll error and
   media id. No failure rule yet — one capture only.
 
+**Outcome `4` "Media not found." is not a failure signal (2026-09-26)**
+
+- The same scene redone with a short prompt (same model, image, aspect)
+  **succeeded** in 64 s: operation `23fe114e-8e41-4ead-9bc8-d3ee42c88dcc`,
+  8 s 720x1280 clip with audio. Its operation record, verbatim, 10 s after submit:
+
+  ```
+  [null, 230, [["23fe114e-8e41-4ead-9bc8-d3ee42c88dcc", null, null, null, null, [null, null, null, null, null, null, null, null, [4, [null, "Media not found."], ["Media not found."]]]]]]
+  ```
+
+  — identical in shape to the failed job's. **Outcome code `4` cannot tell a
+  failed job from a working one.**
+- The signs that did mark the real failure: **the credit was refunded**, the
+  media id from the listing answered **`as29s` `[5]`** (NOT_FOUND) on every
+  poll, and the operation **disappeared from the project listing**. A job that
+  works stays in the listing and its media lookup answers with a poster, then
+  the `/video/` url.
+- The failed and the successful submit differed only in the prompt: 828
+  characters with a line of dialogue, a "Then cut to" second shot, `(no
+  subtitles)`, Audio/SFX/Negative lines and character voices, against 299
+  characters for one continuous shot (worker suffixes included).
+
 ## API
 
 | Endpoint | Body | Effect |
