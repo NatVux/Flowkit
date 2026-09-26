@@ -63,3 +63,18 @@ export function ActionButton({ children, cost, onClick, disabled, tone = 'primar
     </button>
   )
 }
+
+/** A centered dialog over a dim backdrop. `onClose` runs on Escape or a backdrop click. */
+export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)' }}
+         onClick={onClose} onKeyDown={e => { if (e.key === 'Escape') onClose() }} role="presentation">
+      <div role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}
+           className="w-full max-w-lg rounded-lg border p-5 flex flex-col gap-3"
+           style={{ background: 'var(--card)', borderColor: 'var(--border)', color: 'var(--text)' }}>
+        <h2 className="text-sm font-semibold">{title}</h2>
+        {children}
+      </div>
+    </div>
+  )
+}
